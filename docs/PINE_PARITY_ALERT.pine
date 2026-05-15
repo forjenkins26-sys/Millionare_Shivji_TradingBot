@@ -1,0 +1,50 @@
+// ============================================================
+// Vol Surge v5 — Parity Telemetry Alert
+// Add this block at the BOTTOM of your Pine script.
+// Do NOT change any signal logic above it.
+// ============================================================
+
+// Build signal string
+var string _parity_sig = "NONE"
+if buySignal        // ← replace with your actual BUY signal variable name
+    _parity_sig := "BUY"
+else if sellSignal  // ← replace with your actual SELL signal variable name
+    _parity_sig := "SELL"
+else
+    _parity_sig := "NONE"
+
+// Emit JSON parity snapshot on every confirmed bar close
+if barstate.isconfirmed
+    string _pj =
+        '{"v":"1"'                                                        +
+        ',"ts":'     + str.tostring(math.round(time / 1000))             +
+        ',"sig":"'   + _parity_sig                                       + '"' +
+        ',"cat":'    + str.tostring(chopAvgTR,      "#.##")              +
+        ',"bt":'     + str.tostring(burstThreshold, "#.##")              +
+        ',"atr5":'   + str.tostring(atr5,           "#.##")              +
+        ',"a5p":'    + str.tostring(atr5[1],        "#.##")              +
+        ',"sld":'    + str.tostring(vsSLDist,       "#.##")              +
+        ',"cd":'     + str.tostring(cooldownLeft,   "#")                 +
+        ',"ema":'    + str.tostring(ema200,         "#.##")              +
+        ',"abv":'    + (close > ema200 ? "true" : "false")               +
+        ',"ses":'    + (sessionOK ? "true" : "false")                    +
+        ',"body":'   + str.tostring(math.abs(close - open), "#.##")      +
+        '}'
+    alert(_pj, alert.freq_once_per_bar_close)
+
+// ============================================================
+// TradingView Alert Setup (do this ONCE after saving the script)
+// ============================================================
+//
+// 1. Click the Bell icon (Alerts) → Create Alert
+// 2. Condition: [Your indicator name] → "alert() function calls"
+// 3. Webhook URL:
+//       http://YOUR_PUBLIC_URL/parity/pine-webhook?token=volsurge-parity-token
+//    (Replace YOUR_PUBLIC_URL with your ngrok/Cloudflare/Railway URL)
+//    (Replace volsurge-parity-token with your PARITY_SECRET env var value)
+// 4. Message: leave blank (payload comes from alert() call above)
+// 5. Expiry: Open-ended
+// 6. Click Save
+//
+// That's it. Every bar close will now auto-fill parity_log.csv.
+// ============================================================

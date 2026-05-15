@@ -1,0 +1,8 @@
+# Vol Surge v5 — additional dependencies (on top of existing requirements)
+# Install: pip install -r requirements_v5.txt
+
+websockets>=12.0      # async WebSocket client for Delta Exchange feed
+fastapi>=0.100.0      # already in v4 requirements
+uvicorn>=0.23.0       # already in v4 requirements
+requests>=2.28.0      # already in v4 requirements
+pytest>=7.0.0         # for running tests locally

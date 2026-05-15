@@ -1,0 +1,13 @@
+# Vol Surge Bot v3.1 — Python dependencies
+# Last updated: 11 May 2026
+
+# Web server
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+
+# HTTP client (outbound Delta API calls + test endpoints)
+requests>=2.31.0
+httpx>=0.27.0
+
+# Environment variable loading (.env support)
+python-dotenv>=1.0.0

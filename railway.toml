@@ -1,0 +1,9 @@
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "uvicorn volsurge_v3:app --host 0.0.0.0 --port $PORT --workers 1"
+healthcheckPath = "/health"
+healthcheckTimeout = 30
+restartPolicyType = "always"
+restartPolicyMaxRetries = 10
