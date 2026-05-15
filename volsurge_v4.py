@@ -75,8 +75,8 @@ TP_R = 2.0   # TP = entry ± sl_dist × 2.0  (2R)
 # MAX_WH_LATENCY_MS  : reject if webhook arrived more than this many ms late.
 #   2000ms = 2 seconds. Signal price is stale beyond this.
 #   Set to 0 to disable.
-MAX_SLIPPAGE_RATIO = float(os.getenv("MAX_SLIPPAGE_RATIO", "0.75"))
-MAX_WH_LATENCY_MS  = float(os.getenv("MAX_WH_LATENCY_MS",  "2000"))
+MAX_SLIPPAGE_RATIO = float(os.getenv("MAX_SLIPPAGE_RATIO", "0.0"))
+MAX_WH_LATENCY_MS  = float(os.getenv("MAX_WH_LATENCY_MS",  "0"))
 
 PRICE_INTERVAL = 2   # seconds between price poll ticks
 POS_MON_DELAY  = 3   # seconds to wait after entry before monitor starts
