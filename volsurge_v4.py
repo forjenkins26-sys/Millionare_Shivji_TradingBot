@@ -1131,8 +1131,18 @@ async def balance():
 @app.get("/history")
 async def history():
     try:
-        with open(CSV_FILE, "r") as f:
-            trades = list(csv.DictReader(f))
+        trades = []
+        try:
+            with open(CSV_FILE, "r") as f:
+                trades = list(csv.DictReader(f))
+        except Exception:
+            pass
+        for bf in sorted(DATA_DIR.glob("trades.v3_backup_*.csv")):
+            try:
+                with open(bf, "r") as f:
+                    trades = list(csv.DictReader(f)) + trades
+            except Exception:
+                pass
         return JSONResponse({"count": len(trades), "trades": trades[-20:]})
     except Exception:
         return JSONResponse({"count": 0, "trades": []})
@@ -1215,12 +1225,26 @@ async def test_telegram():
 # ── /dashboard ────────────────────────────────────────────────────────
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard():
-    """Trade journal dashboard — reads trades.csv and renders as HTML table."""
+    """Trade journal dashboard — reads trades.csv + any v3 backup files."""
+    trades = []
+    # Read current v4 trades
     try:
         with open(CSV_FILE, "r") as f:
             trades = list(csv.DictReader(f))
     except Exception:
-        trades = []
+        pass
+    # Also read any v3 backup files and merge (oldest first)
+    try:
+        backup_files = sorted(DATA_DIR.glob("trades.v3_backup_*.csv"))
+        for bf in backup_files:
+            try:
+                with open(bf, "r") as f:
+                    old_rows = list(csv.DictReader(f))
+                trades = old_rows + trades   # old trades first, newer on top
+            except Exception:
+                pass
+    except Exception:
+        pass
 
     trades_reversed = list(reversed(trades))
 
