@@ -33,8 +33,10 @@ asianOpen   = input.int(6,     "Asian Open   (IST hr)", minval=0, maxval=12, gro
 asianClose  = input.int(10,    "Asian Close  (IST hr)", minval=0, maxval=12, group=grpSess)
 
 grpRisk = "Risk / Journal"
-fixedLot   = input.float(0.1,  "Fixed Lot (for P&L)",    minval=0.01, maxval=10,    step=0.01, group=grpRisk)
-startBal   = input.float(500,  "Start Balance ($)",       minval=10,   step=100,               group=grpRisk)
+fixedLot    = input.float(0.1, "Fixed Lot (for P&L)",         minval=0.001, maxval=10,  step=0.001, group=grpRisk)
+startBal    = input.float(500,  "Start Balance ($)",            minval=10,   step=100,              group=grpRisk)
+useCompound = input.bool(true,  "Enable Compound Lots",         group=grpRisk)
+maxCompMult = input.float(10,  "Max Compound Multiplier",      minval=1.0,  maxval=10.0, step=0.5,  group=grpRisk)
 
 grpDisp = "Display"
 showEmaLine = input.bool(true,  "Show EMA line",        group=grpDisp)
@@ -116,27 +118,38 @@ var float statPnl    = 0.0
 var float balance    = startBal
 
 // ── Journal arrays ──
-var int[]    jDir   = array.new_int(0)
-var int[]    jInT   = array.new_int(0)
-var int[]    jOutT  = array.new_int(0)
-var float[]  jEntry = array.new_float(0)
-var float[]  jExit  = array.new_float(0)
-var float[]  jPts   = array.new_float(0)
-var float[]  jPnl   = array.new_float(0)
-var string[] jStat  = array.new_string(0)
-var string[] jSess  = array.new_string(0)
+var int[]    jDir     = array.new_int(0)
+var int[]    jInT     = array.new_int(0)
+var int[]    jOutT    = array.new_int(0)
+var float[]  jEntry   = array.new_float(0)
+var float[]  jExit    = array.new_float(0)
+var float[]  jPts     = array.new_float(0)
+var float[]  jPnl     = array.new_float(0)
+var string[] jStat    = array.new_string(0)
+var string[] jSess    = array.new_string(0)
+var float[]  jLots    = array.new_float(0)
+var float[]  jCmpdPnl = array.new_float(0)
 
-pushJournal(_dir, _inT, _outT, _entPx, _exitPx, _pts, _stat, _sess) =>
+// ── Compound lot state ──
+var float compoundLots    = fixedLot
+var int   consecutiveWins = 0
+var float baseLot         = fixedLot
+var float calcLots        = fixedLot
+var float at_cmpd_acc     = 0.0
+
+pushJournal(_dir, _inT, _outT, _entPx, _exitPx, _pts, _stat, _sess, _lots, _cmpdPnl) =>
     _pnl = math.round(_pts * fixedLot, 2)
-    array.unshift(jDir,   _dir)
-    array.unshift(jInT,   _inT)
-    array.unshift(jOutT,  _outT)
-    array.unshift(jEntry, _entPx)
-    array.unshift(jExit,  _exitPx)
-    array.unshift(jPts,   _pts)
-    array.unshift(jPnl,   _pnl)
-    array.unshift(jStat,  _stat)
-    array.unshift(jSess,  _sess)
+    array.unshift(jDir,     _dir)
+    array.unshift(jInT,     _inT)
+    array.unshift(jOutT,    _outT)
+    array.unshift(jEntry,   _entPx)
+    array.unshift(jExit,    _exitPx)
+    array.unshift(jPts,     _pts)
+    array.unshift(jPnl,     _pnl)
+    array.unshift(jStat,    _stat)
+    array.unshift(jSess,    _sess)
+    array.unshift(jLots,    _lots)
+    array.unshift(jCmpdPnl, _cmpdPnl)
     if array.size(jDir) > maxJRows
         array.pop(jDir)
         array.pop(jInT)
@@ -147,6 +160,8 @@ pushJournal(_dir, _inT, _outT, _entPx, _exitPx, _pts, _stat, _sess) =>
         array.pop(jPnl)
         array.pop(jStat)
         array.pop(jSess)
+        array.pop(jLots)
+        array.pop(jCmpdPnl)
     _pnl
 
 deleteLines() =>
@@ -177,6 +192,7 @@ if volSurgeLong or volSurgeShort
 // ENTER LONG
 // ═══════════════════════════════════════════════════════════
 if volSurgeLong
+    calcLots    := useCompound ? math.round(math.min(compoundLots, baseLot * maxCompMult), 2) : fixedLot
     deleteLines()
     tDir        := 1
     tEntry      := close
@@ -207,6 +223,7 @@ if volSurgeLong
 // ENTER SHORT
 // ═══════════════════════════════════════════════════════════
 if volSurgeShort
+    calcLots    := useCompound ? math.round(math.min(compoundLots, baseLot * maxCompMult), 2) : fixedLot
     deleteLines()
     tDir        := -1
     tEntry      := close
@@ -265,10 +282,14 @@ if tDir == 1
     // ── TP2: remaining 50% exits ──
     if _exitOK and high >= tTP2
         // Blended PnL: 50% booked at TP1 + 50% exiting at TP2
-        _blended = tTP1Hit ? 0.5 * (tTP1 - tEntry) + 0.5 * (tTP2 - tEntry) : (tTP2 - tEntry)
-        _pts     = math.round(_blended, 1)
-        _statStr = tTP1Hit ? "TP1 + TP2" : "TP2 ✓"
-        _rpnl    = pushJournal(1, tEntryT, time, tEntry, tTP2, _pts, _statStr, tSess)
+        _blended  = tTP1Hit ? 0.5 * (tTP1 - tEntry) + 0.5 * (tTP2 - tEntry) : (tTP2 - tEntry)
+        _pts      = math.round(_blended, 1)
+        _statStr  = tTP1Hit ? "TP1 + TP2" : "TP2 ✓"
+        _cmpd_pnl = math.round(_pts * calcLots, 2)
+        at_cmpd_acc     += _cmpd_pnl
+        consecutiveWins += 1
+        compoundLots    := math.min(baseLot * (consecutiveWins + 1), baseLot * maxCompMult)
+        _rpnl     = pushJournal(1, tEntryT, time, tEntry, tTP2, _pts, _statStr, tSess, calcLots, _cmpd_pnl)
         statTrades += 1
         statWins   += 1
         statPts    += _pts
@@ -282,14 +303,18 @@ if tDir == 1
     // ── SL: full or remaining 50% hits original SL ──
     else if _exitOK and low <= tSL
         // Blended PnL: if TP1 was hit → 50% at TP1 + 50% at SL; else full loss
-        _blended = tTP1Hit ? 0.5 * (tTP1 - tEntry) + 0.5 * (tSL - tEntry) : (tSL - tEntry)
-        _pts     = math.round(_blended, 1)
-        _statStr = tTP1Hit ? "TP1 + SL" : "SL X"
-        _rpnl    = pushJournal(1, tEntryT, time, tEntry, tSL, _pts, _statStr, tSess)
+        _blended  = tTP1Hit ? 0.5 * (tTP1 - tEntry) + 0.5 * (tSL - tEntry) : (tSL - tEntry)
+        _pts      = math.round(_blended, 1)
+        _statStr  = tTP1Hit ? "TP1 + SL" : "SL X"
+        _cmpd_pnl = math.round(_pts * calcLots, 2)
+        at_cmpd_acc     += _cmpd_pnl
+        consecutiveWins := 0
+        compoundLots    := baseLot
+        _rpnl     = pushJournal(1, tEntryT, time, tEntry, tSL, _pts, _statStr, tSess, calcLots, _cmpd_pnl)
         statTrades += 1
-        statPts  += _pts
-        statPnl  += _rpnl
-        balance  += _rpnl
+        statPts    += _pts
+        statPnl    += _rpnl
+        balance    += _rpnl
         label.new(bar_index, tSL, _statStr + "  " + (_pts >= 0 ? "+" : "") + str.tostring(_pts) + "pts", color=color.new(#f23645,10), textcolor=color.white, style=label.style_label_left, size=size.small)
         deleteLines()
         tDir := 0
@@ -326,10 +351,14 @@ if tDir == -1
     // ── TP2: remaining 50% exits ──
     if _exitOK and low <= tTP2
         // Blended PnL: 50% booked at TP1 + 50% exiting at TP2
-        _blended = tTP1Hit ? 0.5 * (tEntry - tTP1) + 0.5 * (tEntry - tTP2) : (tEntry - tTP2)
-        _pts     = math.round(_blended, 1)
-        _statStr = tTP1Hit ? "TP1 + TP2" : "TP2 ✓"
-        _rpnl    = pushJournal(-1, tEntryT, time, tEntry, tTP2, _pts, _statStr, tSess)
+        _blended  = tTP1Hit ? 0.5 * (tEntry - tTP1) + 0.5 * (tEntry - tTP2) : (tEntry - tTP2)
+        _pts      = math.round(_blended, 1)
+        _statStr  = tTP1Hit ? "TP1 + TP2" : "TP2 ✓"
+        _cmpd_pnl = math.round(_pts * calcLots, 2)
+        at_cmpd_acc     += _cmpd_pnl
+        consecutiveWins += 1
+        compoundLots    := math.min(baseLot * (consecutiveWins + 1), baseLot * maxCompMult)
+        _rpnl     = pushJournal(-1, tEntryT, time, tEntry, tTP2, _pts, _statStr, tSess, calcLots, _cmpd_pnl)
         statTrades += 1
         statWins   += 1
         statPts    += _pts
@@ -343,14 +372,18 @@ if tDir == -1
     // ── SL: full or remaining 50% hits original SL ──
     else if _exitOK and high >= tSL
         // Blended PnL: if TP1 was hit → 50% at TP1 + 50% at SL; else full loss
-        _blended = tTP1Hit ? 0.5 * (tEntry - tTP1) + 0.5 * (tEntry - tSL) : (tEntry - tSL)
-        _pts     = math.round(_blended, 1)
-        _statStr = tTP1Hit ? "TP1 + SL" : "SL X"
-        _rpnl    = pushJournal(-1, tEntryT, time, tEntry, tSL, _pts, _statStr, tSess)
+        _blended  = tTP1Hit ? 0.5 * (tEntry - tTP1) + 0.5 * (tEntry - tSL) : (tEntry - tSL)
+        _pts      = math.round(_blended, 1)
+        _statStr  = tTP1Hit ? "TP1 + SL" : "SL X"
+        _cmpd_pnl = math.round(_pts * calcLots, 2)
+        at_cmpd_acc     += _cmpd_pnl
+        consecutiveWins := 0
+        compoundLots    := baseLot
+        _rpnl     = pushJournal(-1, tEntryT, time, tEntry, tSL, _pts, _statStr, tSess, calcLots, _cmpd_pnl)
         statTrades += 1
-        statPts  += _pts
-        statPnl  += _rpnl
-        balance  += _rpnl
+        statPts    += _pts
+        statPnl    += _rpnl
+        balance    += _rpnl
         label.new(bar_index, tSL, _statStr + "  " + (_pts >= 0 ? "+" : "") + str.tostring(_pts) + "pts", color=color.new(#f23645,10), textcolor=color.white, style=label.style_label_left, size=size.small)
         deleteLines()
         tDir := 0
@@ -397,9 +430,10 @@ if barstate.islast and showTable
     table.cell(statusTbl, 1, 6, _hStr,          text_color=_hCol,  text_size=size.small)
 
 // ═══════════════════════════════════════════════════════════
-// JOURNAL + ALL-TIME STATS TABLE  (bottom-right)
+// JOURNAL TABLE  (bottom-right)
+// Columns: Dir | Date | In | Out | Entry$ | Exit$ | Pts | Lots | Cmpd P&L | Fix P&L | Status/Sess
 // ═══════════════════════════════════════════════════════════
-var table jTbl = table.new(position.bottom_right, 9, 16,
+var table jTbl = table.new(position.bottom_right, 11, 16,
   bgcolor=color.new(#0d0d0d,5), border_color=color.new(#333333,0), border_width=1,
   frame_color=color.new(#555555,0), frame_width=1)
 
@@ -412,45 +446,51 @@ fmtPx(px) =>
 if barstate.islast and showJournal
     _hbg = color.new(#1a1400,0)
     _hfg = color.new(#ffeb3b,0)
-    table.cell(jTbl, 0, 0, "Dir",          text_color=_hfg, text_size=size.small, bgcolor=_hbg)
-    table.cell(jTbl, 1, 0, "Date",         text_color=_hfg, text_size=size.small, bgcolor=_hbg)
-    table.cell(jTbl, 2, 0, "In",           text_color=_hfg, text_size=size.small, bgcolor=_hbg)
-    table.cell(jTbl, 3, 0, "Out",          text_color=_hfg, text_size=size.small, bgcolor=_hbg)
-    table.cell(jTbl, 4, 0, "Entry $",      text_color=_hfg, text_size=size.small, bgcolor=_hbg)
-    table.cell(jTbl, 5, 0, "Exit $",       text_color=_hfg, text_size=size.small, bgcolor=_hbg)
-    table.cell(jTbl, 6, 0, "Pts",          text_color=_hfg, text_size=size.small, bgcolor=_hbg)
-    table.cell(jTbl, 7, 0, "Fix P&L",      text_color=_hfg, text_size=size.small, bgcolor=_hbg)
-    table.cell(jTbl, 8, 0, "Status / Sess",text_color=_hfg, text_size=size.small, bgcolor=_hbg)
+    table.cell(jTbl, 0,  0, "Dir",           text_color=_hfg, text_size=size.small, bgcolor=_hbg)
+    table.cell(jTbl, 1,  0, "Date",          text_color=_hfg, text_size=size.small, bgcolor=_hbg)
+    table.cell(jTbl, 2,  0, "In",            text_color=_hfg, text_size=size.small, bgcolor=_hbg)
+    table.cell(jTbl, 3,  0, "Out",           text_color=_hfg, text_size=size.small, bgcolor=_hbg)
+    table.cell(jTbl, 4,  0, "Entry $",       text_color=_hfg, text_size=size.small, bgcolor=_hbg)
+    table.cell(jTbl, 5,  0, "Exit $",        text_color=_hfg, text_size=size.small, bgcolor=_hbg)
+    table.cell(jTbl, 6,  0, "Pts",           text_color=_hfg, text_size=size.small, bgcolor=_hbg)
+    table.cell(jTbl, 7,  0, "Lots",          text_color=_hfg, text_size=size.small, bgcolor=_hbg)
+    table.cell(jTbl, 8,  0, "Cmpd P&L",      text_color=_hfg, text_size=size.small, bgcolor=_hbg)
+    table.cell(jTbl, 9,  0, "Fix P&L",       text_color=_hfg, text_size=size.small, bgcolor=_hbg)
+    table.cell(jTbl, 10, 0, "Status / Sess", text_color=_hfg, text_size=size.small, bgcolor=_hbg)
 
     _n = array.size(jDir)
     for r = 0 to maxJRows - 1
         _row = r + 1
         if r < _n
-            _d    = array.get(jDir,   r)
-            _inT  = array.get(jInT,   r)
-            _outT = array.get(jOutT,  r)
-            _ent  = array.get(jEntry, r)
-            _ext  = array.get(jExit,  r)
-            _pts  = array.get(jPts,   r)
-            _pnl  = array.get(jPnl,   r)
-            _st   = array.get(jStat,  r)
-            _se   = array.get(jSess,  r)
+            _d    = array.get(jDir,     r)
+            _inT  = array.get(jInT,     r)
+            _outT = array.get(jOutT,    r)
+            _ent  = array.get(jEntry,   r)
+            _ext  = array.get(jExit,    r)
+            _pts  = array.get(jPts,     r)
+            _pnl  = array.get(jPnl,     r)
+            _st   = array.get(jStat,    r)
+            _se   = array.get(jSess,    r)
+            _lots = array.get(jLots,    r)
+            _cpnl = array.get(jCmpdPnl, r)
             _win  = _st == "TP1 + TP2" or _st == "TP2 ✓"
             _bg   = _win ? color.new(#0a1f0a,0) : color.new(#1f0a0a,0)
             _pc   = _win ? color.new(#26a69a,0) : color.new(#f23645,0)
             _dc   = _d == 1 ? color.new(#26a69a,0) : color.new(#f23645,0)
             _dateStr = str.tostring(dayofmonth(_inT,"UTC+5:30"),"00") + "/" + str.tostring(month(_inT,"UTC+5:30"),"00")
-            table.cell(jTbl, 0, _row, _d == 1 ? "▲" : "▼",                                       text_color=_dc,          text_size=size.small, bgcolor=_bg)
-            table.cell(jTbl, 1, _row, _dateStr,                                                    text_color=color.silver, text_size=size.small, bgcolor=_bg)
-            table.cell(jTbl, 2, _row, fmtT(_inT),                                                 text_color=color.silver, text_size=size.small, bgcolor=_bg)
-            table.cell(jTbl, 3, _row, fmtT(_outT),                                                text_color=color.silver, text_size=size.small, bgcolor=_bg)
-            table.cell(jTbl, 4, _row, fmtPx(_ent),                                                text_color=color.new(#90caf9,0), text_size=size.small, bgcolor=_bg)
-            table.cell(jTbl, 5, _row, fmtPx(_ext),                                                text_color=_pc,          text_size=size.small, bgcolor=_bg)
-            table.cell(jTbl, 6, _row, (_pts >= 0 ? "+" : "") + str.tostring(_pts),                text_color=_pc,          text_size=size.small, bgcolor=_bg)
-            table.cell(jTbl, 7, _row, (_pnl >= 0 ? "+$" : "-$") + str.tostring(math.abs(_pnl)),  text_color=_pc,          text_size=size.small, bgcolor=_bg)
-            table.cell(jTbl, 8, _row, _st + " · " + _se,                                          text_color=_pc,          text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 0,  _row, _d == 1 ? "▲" : "▼",                                         text_color=_dc,                   text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 1,  _row, _dateStr,                                                      text_color=color.silver,          text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 2,  _row, fmtT(_inT),                                                   text_color=color.silver,          text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 3,  _row, fmtT(_outT),                                                  text_color=color.silver,          text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 4,  _row, fmtPx(_ent),                                                  text_color=color.new(#90caf9,0),  text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 5,  _row, fmtPx(_ext),                                                  text_color=_pc,                   text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 6,  _row, (_pts >= 0 ? "+" : "") + str.tostring(_pts),                  text_color=_pc,                   text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 7,  _row, str.tostring(_lots),                                           text_color=color.new(#d1d5db,0),  text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 8,  _row, (_cpnl >= 0 ? "+$" : "-$") + str.tostring(math.abs(_cpnl)),   text_color=_pc,                   text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 9,  _row, (_pnl  >= 0 ? "+$" : "-$") + str.tostring(math.abs(_pnl)),   text_color=_pc,                   text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 10, _row, _st + " · " + _se,                                             text_color=_pc,                   text_size=size.small, bgcolor=_bg)
         else
-            for c = 0 to 8
+            for c = 0 to 10
                 table.cell(jTbl, c, _row, "", text_size=size.small, bgcolor=color.new(#111111,0))
 
     _liveRow = maxJRows + 1
@@ -459,34 +499,97 @@ if barstate.islast and showJournal
         _lCol  = tDir == 1 ? color.new(#26a69a,0) : color.new(#f23645,0)
         _lPts  = tDir == 1 ? math.round(close - tEntry,1) : math.round(tEntry - close,1)
         _lPnl  = math.round(_lPts * fixedLot, 2)
+        _lCpnl = math.round(_lPts * calcLots, 2)
         _lbg   = color.new(#0a0a1f,0)
-        table.cell(jTbl, 0, _liveRow, _lDir,                                                        text_color=_lCol,        text_size=size.small, bgcolor=_lbg)
-        table.cell(jTbl, 1, _liveRow, "LIVE",                                                       text_color=color.yellow, text_size=size.small, bgcolor=_lbg)
-        table.cell(jTbl, 2, _liveRow, fmtT(tEntryT),                                               text_color=color.silver, text_size=size.small, bgcolor=_lbg)
-        table.cell(jTbl, 3, _liveRow, "—",                                                          text_color=color.gray,   text_size=size.small, bgcolor=_lbg)
-        table.cell(jTbl, 4, _liveRow, fmtPx(tEntry),                                               text_color=color.new(#90caf9,0), text_size=size.small, bgcolor=_lbg)
-        table.cell(jTbl, 5, _liveRow, fmtPx(close),                                                text_color=_lCol,        text_size=size.small, bgcolor=_lbg)
-        table.cell(jTbl, 6, _liveRow, (_lPts >= 0 ? "+" : "") + str.tostring(_lPts),               text_color=_lCol,        text_size=size.small, bgcolor=_lbg)
-        table.cell(jTbl, 7, _liveRow, (_lPnl >= 0 ? "+$" : "-$") + str.tostring(math.abs(_lPnl)), text_color=_lCol,        text_size=size.small, bgcolor=_lbg)
-        table.cell(jTbl, 8, _liveRow, tTP1Hit ? "TP1 Hit · 50% Booked" : "Open",                   text_color=color.yellow, text_size=size.small, bgcolor=_lbg)
+        table.cell(jTbl, 0,  _liveRow, _lDir,                                                           text_color=_lCol,                 text_size=size.small, bgcolor=_lbg)
+        table.cell(jTbl, 1,  _liveRow, "LIVE",                                                          text_color=color.yellow,          text_size=size.small, bgcolor=_lbg)
+        table.cell(jTbl, 2,  _liveRow, fmtT(tEntryT),                                                  text_color=color.silver,          text_size=size.small, bgcolor=_lbg)
+        table.cell(jTbl, 3,  _liveRow, "—",                                                             text_color=color.gray,            text_size=size.small, bgcolor=_lbg)
+        table.cell(jTbl, 4,  _liveRow, fmtPx(tEntry),                                                  text_color=color.new(#90caf9,0),  text_size=size.small, bgcolor=_lbg)
+        table.cell(jTbl, 5,  _liveRow, fmtPx(close),                                                   text_color=_lCol,                 text_size=size.small, bgcolor=_lbg)
+        table.cell(jTbl, 6,  _liveRow, (_lPts >= 0 ? "+" : "") + str.tostring(_lPts),                  text_color=_lCol,                 text_size=size.small, bgcolor=_lbg)
+        table.cell(jTbl, 7,  _liveRow, str.tostring(calcLots),                                          text_color=color.new(#d1d5db,0),  text_size=size.small, bgcolor=_lbg)
+        table.cell(jTbl, 8,  _liveRow, (_lCpnl >= 0 ? "+$" : "-$") + str.tostring(math.abs(_lCpnl)),  text_color=_lCol,                 text_size=size.small, bgcolor=_lbg)
+        table.cell(jTbl, 9,  _liveRow, (_lPnl  >= 0 ? "+$" : "-$") + str.tostring(math.abs(_lPnl)),   text_color=_lCol,                 text_size=size.small, bgcolor=_lbg)
+        table.cell(jTbl, 10, _liveRow, tTP1Hit ? "TP1 Hit · 50% Booked" : "Open",                      text_color=color.yellow,          text_size=size.small, bgcolor=_lbg)
     else
-        for c = 0 to 8
+        for c = 0 to 10
             table.cell(jTbl, c, _liveRow, "", bgcolor=color.new(#111111,0))
 
-    _wr       = statTrades > 0 ? math.round(statWins / statTrades * 100) : 0
-    _ret      = math.round(statPnl / startBal * 100, 1)
-    _sbg      = color.new(#0d1a0d,0)
-    _sfg      = color.new(#cccccc,0)
-    _statsRow = maxJRows + 2
-    table.cell(jTbl, 0, _statsRow, "WR " + str.tostring(_wr) + "% (" + str.tostring(statWins) + "/" + str.tostring(statTrades) + ")", text_color=color.new(#26a69a,0), text_size=size.small, bgcolor=_sbg)
-    table.cell(jTbl, 1, _statsRow, str.tostring(math.round(statPts,1)) + " pts",  text_color=_sfg, text_size=size.small, bgcolor=_sbg)
-    table.cell(jTbl, 2, _statsRow, "",           text_color=color.gray, text_size=size.small, bgcolor=_sbg)
-    table.cell(jTbl, 3, _statsRow, "",           text_color=color.gray, text_size=size.small, bgcolor=_sbg)
-    table.cell(jTbl, 4, _statsRow, "Fix P&L",   text_color=color.gray, text_size=size.small, bgcolor=_sbg)
-    table.cell(jTbl, 5, _statsRow, (statPnl >= 0 ? "+$" : "-$") + str.tostring(math.abs(math.round(statPnl,2))), text_color=statPnl >= 0 ? color.new(#26a69a,0) : color.new(#f23645,0), text_size=size.small, bgcolor=_sbg)
-    table.cell(jTbl, 6, _statsRow, "Bal",        text_color=color.gray, text_size=size.small, bgcolor=_sbg)
-    table.cell(jTbl, 7, _statsRow, "$" + str.tostring(math.round(balance,2)), text_color=color.white, text_size=size.small, bgcolor=_sbg)
-    table.cell(jTbl, 8, _statsRow, "+" + str.tostring(_ret) + "%",            text_color=_ret >= 0 ? color.new(#26a69a,0) : color.new(#f23645,0), text_size=size.small, bgcolor=_sbg)
+    // ── Journal summary: totals of VISIBLE rows only ──────────────
+    _visJPts  = 0.0
+    _visJPnl  = 0.0
+    _visJCPnl = 0.0
+    _visJWins = 0
+    _visJN    = array.size(jDir)
+    for _rv = 0 to _visJN - 1
+        _visJPts  += array.get(jPts,     _rv)
+        _visJPnl  += array.get(jPnl,     _rv)
+        _visJCPnl += array.get(jCmpdPnl, _rv)
+        _vst = array.get(jStat, _rv)
+        if _vst == "TP1 + TP2" or _vst == "TP2 ✓"
+            _visJWins += 1
+    _visWr      = _visJN > 0 ? math.round(_visJWins / _visJN * 100) : 0
+    _visPtsStr  = (_visJPts  >= 0 ? "+" : "") + str.tostring(math.round(_visJPts,1)) + " pts"
+    _visCPnlStr = (_visJCPnl >= 0 ? "+$" : "-$") + str.tostring(math.abs(math.round(_visJCPnl,2)))
+    _visPnlStr  = (_visJPnl  >= 0 ? "+$" : "-$") + str.tostring(math.abs(math.round(_visJPnl,2)))
+    _visPtsCol  = _visJPts  >= 0 ? color.new(#26a69a,0) : color.new(#f23645,0)
+    _visCPnlCol = _visJCPnl >= 0 ? color.new(#26a69a,0) : color.new(#f23645,0)
+    _visPnlCol  = _visJPnl  >= 0 ? color.new(#26a69a,0) : color.new(#f23645,0)
+    _sbg        = color.new(#0d1a0d,0)
+    _statsRow   = maxJRows + 2
+    table.cell(jTbl, 0,  _statsRow, "WR " + str.tostring(_visWr) + "% (" + str.tostring(_visJWins) + "/" + str.tostring(_visJN) + ")", text_color=color.new(#26a69a,0), text_size=size.small, bgcolor=_sbg)
+    table.cell(jTbl, 1,  _statsRow, "", text_color=color.gray, text_size=size.small, bgcolor=_sbg)
+    table.cell(jTbl, 2,  _statsRow, "", text_color=color.gray, text_size=size.small, bgcolor=_sbg)
+    table.cell(jTbl, 3,  _statsRow, "", text_color=color.gray, text_size=size.small, bgcolor=_sbg)
+    table.cell(jTbl, 4,  _statsRow, "", text_color=color.gray, text_size=size.small, bgcolor=_sbg)
+    table.cell(jTbl, 5,  _statsRow, "", text_color=color.gray, text_size=size.small, bgcolor=_sbg)
+    table.cell(jTbl, 6,  _statsRow, _visPtsStr,  text_color=_visPtsCol,  text_size=size.small, bgcolor=_sbg)
+    table.cell(jTbl, 7,  _statsRow, "",           text_color=color.gray,  text_size=size.small, bgcolor=_sbg)
+    table.cell(jTbl, 8,  _statsRow, _visCPnlStr, text_color=_visCPnlCol, text_size=size.small, bgcolor=_sbg)
+    table.cell(jTbl, 9,  _statsRow, _visPnlStr,  text_color=_visPnlCol,  text_size=size.small, bgcolor=_sbg)
+    table.cell(jTbl, 10, _statsRow, "",           text_color=color.gray,  text_size=size.small, bgcolor=_sbg)
+
+// ═══════════════════════════════════════════════════════════
+// ALL-TIME STATS TABLE  (bottom-left)
+// ═══════════════════════════════════════════════════════════
+var table atTbl = table.new(position.bottom_left, 2, 9,
+  bgcolor=color.new(#0d0d0d,5), border_color=color.new(#333333,0), border_width=1,
+  frame_color=color.new(#555555,0), frame_width=1)
+
+if barstate.islast and showJournal
+    _awt  = statTrades > 0 ? math.round(statWins / statTrades * 100) : 0
+    _aret = startBal > 0 ? math.round(statPnl / startBal * 100, 1) : 0.0
+    _ahbg = color.new(#1a1400,0)
+    _ahfg = color.new(#ffeb3b,0)
+    _asbg = color.new(#111111,0)
+    _amc  = color.new(#787b86,0)
+    _ass  = size.small
+
+    _awrCol   = _awt >= 60 ? color.new(#26a69a,0) : _awt >= 40 ? color.new(#ff9800,0) : color.new(#f23645,0)
+    _apnlCol  = statPnl     >= 0 ? color.new(#26a69a,0) : color.new(#f23645,0)
+    _acpnlCol = at_cmpd_acc >= 0 ? color.new(#26a69a,0) : color.new(#f23645,0)
+    _abalCol  = balance >= startBal ? color.new(#26a69a,0) : color.new(#f23645,0)
+    _aretCol  = _aret >= 0 ? color.new(#26a69a,0) : color.new(#f23645,0)
+
+    table.cell(atTbl, 0, 0, "ALL-TIME STATS",  text_color=_ahfg, text_size=_ass, bgcolor=_ahbg)
+    table.cell(atTbl, 1, 0, str.tostring(statTrades) + " total trades", text_color=_amc, text_size=_ass, bgcolor=_ahbg)
+    table.cell(atTbl, 0, 1, "Win Rate",         text_color=_amc,  text_size=_ass, bgcolor=_asbg)
+    table.cell(atTbl, 1, 1, str.tostring(_awt) + "% (" + str.tostring(statWins) + "/" + str.tostring(statTrades) + ")", text_color=_awrCol, text_size=_ass, bgcolor=_asbg)
+    table.cell(atTbl, 0, 2, "Total Pts",        text_color=_amc,  text_size=_ass, bgcolor=_asbg)
+    table.cell(atTbl, 1, 2, str.tostring(math.round(statPts,1)) + " pts", text_color=color.new(#d1d5db,0), text_size=_ass, bgcolor=_asbg)
+    table.cell(atTbl, 0, 3, "Flat P&L",         text_color=_amc,  text_size=_ass, bgcolor=_asbg)
+    table.cell(atTbl, 1, 3, (statPnl >= 0 ? "+$" : "-$") + str.tostring(math.abs(math.round(statPnl,2))), text_color=_apnlCol, text_size=_ass, bgcolor=_asbg)
+    table.cell(atTbl, 0, 4, "Cmpd P&L",         text_color=_amc,  text_size=_ass, bgcolor=_asbg)
+    table.cell(atTbl, 1, 4, (at_cmpd_acc >= 0 ? "+$" : "-$") + str.tostring(math.abs(math.round(at_cmpd_acc,2))), text_color=_acpnlCol, text_size=_ass, bgcolor=_asbg)
+    table.cell(atTbl, 0, 5, "Balance",          text_color=_amc,  text_size=_ass, bgcolor=_asbg)
+    table.cell(atTbl, 1, 5, "$" + str.tostring(math.round(balance,2)) + " (flat)", text_color=_abalCol, text_size=_ass, bgcolor=_asbg)
+    table.cell(atTbl, 0, 6, "Return",           text_color=_amc,  text_size=_ass, bgcolor=_asbg)
+    table.cell(atTbl, 1, 6, (_aret >= 0 ? "+" : "") + str.tostring(_aret) + "%", text_color=_aretCol, text_size=_ass, bgcolor=_asbg)
+    table.cell(atTbl, 0, 7, "Lot size",         text_color=_amc,  text_size=_ass, bgcolor=_asbg)
+    table.cell(atTbl, 1, 7, str.tostring(fixedLot) + " BTC" + (useCompound ? " (cmpd)" : " (fixed)"), text_color=color.new(#d1d5db,0), text_size=_ass, bgcolor=_asbg)
+    table.cell(atTbl, 0, 8, "Burst thresh",     text_color=_amc,  text_size=_ass, bgcolor=_asbg)
+    table.cell(atTbl, 1, 8, str.tostring(math.round(burstThreshold,1)) + " pts body", text_color=color.new(#ffeb3b,0), text_size=_ass, bgcolor=_asbg)
 
 // ═══════════════════════════════════════════════════════════
 // ALERTS
@@ -500,5 +603,3 @@ if barstate.islast and showJournal
 alertcondition(volSurgeLong,  "Vol Surge BUY",  '{"signal":"BUY","secret":"VolSurge2026#Railway$BTC"}')
 alertcondition(volSurgeShort, "Vol Surge SELL", '{"signal":"SELL","secret":"VolSurge2026#Railway$BTC"}')
 alertcondition(volSurgeLong or volSurgeShort, "Vol Surge ANY", '{"signal":"ANY","secret":"VolSurge2026#Railway$BTC"}')
-
-

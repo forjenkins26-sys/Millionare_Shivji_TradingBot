@@ -173,7 +173,7 @@ CSV_HEADERS = [
     "signal_timeframe", "signal_tf_bar_time",
     # Prices
     "pine_entry_px", "fill_price", "entry_slippage_pts",
-    "pine_tp", "pine_sl",
+    "sl_price", "tp_price",
     # Timestamps & latency
     "pine_signal_time", "webhook_recv_time", "entry_fill_time",
     "webhook_latency_ms", "entry_latency_ms",
@@ -578,8 +578,11 @@ def _set_open_trade(
     global open_trade
     d = direction
 
-    sl_price = round(fill_price - sl_dist, 1) if d == "BUY" else round(fill_price + sl_dist, 1)
-    tp_price = round(fill_price + sl_dist * TP_R, 1) if d == "BUY" else round(fill_price - sl_dist * TP_R, 1)
+    # Use Pine's exact SL/TP levels (close-based) so bot and Pine chart stay in sync.
+    # Pine sends sl/tp2 in the webhook computed from close price — using those directly
+    # means both Pine and bot trigger at the same price, regardless of fill slippage.
+    sl_price = round(pine_sl, 1)
+    tp_price = round(pine_tp, 1)
 
     entry_slippage   = round(fill_price - pine_entry_px, 2) if d == "BUY" else round(pine_entry_px - fill_price, 2)
     wh_latency_ms    = round((webhook_recv_time - pine_signal_time / 1000) * 1000, 1)
@@ -842,9 +845,10 @@ def _process_entry(
             fill_px = round(fill_px, 1)
 
             # Place full-size SL stop + TP limit orders
+            # Use Pine's exact levels (close-based) so bot exits match Pine chart exactly.
             close_side = "sell" if d == "BUY" else "buy"
-            sl_price   = round(fill_px - sl_dist, 1) if d == "BUY" else round(fill_px + sl_dist, 1)
-            tp_price   = round(fill_px + sl_dist * TP_R, 1) if d == "BUY" else round(fill_px - sl_dist * TP_R, 1)
+            sl_price   = round(pine_sl, 1)
+            tp_price   = round(pine_tp, 1)
 
             sl_oid = place_sl_order(close_side, LOT_SIZE, sl_price)
             tp_oid = place_tp_order(close_side, LOT_SIZE, tp_price)
