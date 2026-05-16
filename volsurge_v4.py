@@ -96,9 +96,10 @@ STATE_CLOSED  = "CLOSED"
 DATA_DIR   = Path(os.getenv("DATA_DIR", "data")); DATA_DIR.mkdir(exist_ok=True)
 LOG_DIR    = Path(os.getenv("LOG_DIR",  "logs")); LOG_DIR.mkdir(exist_ok=True)
 STATE_FILE = DATA_DIR / "state.json"
-CSV_FILE   = DATA_DIR / "trades.csv"
-RECON_FILE = DATA_DIR / "reconciliation.csv"
-LOG_FILE   = LOG_DIR  / "volsurge_v4.log"
+CSV_FILE       = DATA_DIR / "trades.csv"
+RECON_FILE     = DATA_DIR / "reconciliation.csv"
+LIFECYCLE_FILE = DATA_DIR / "order_lifecycle.csv"
+LOG_FILE       = LOG_DIR  / "volsurge_v4.log"
 
 # ════════════════════════════════════════════════════════════════════════
 # LOGGING
@@ -189,6 +190,17 @@ CSV_HEADERS = [
     "trade_duration_sec", "monitor_cycles_total",
     # Recovery tracking
     "recovery_event", "recovery_reason",
+    # Entry order details (live only)
+    "entry_order_id",       # Delta order ID for the market entry order
+    "api_request_time",     # unix float: when market order API call was sent
+    "api_ack_time",         # unix float: when Delta responded to entry order
+    "sl_placed_time",       # unix float: when SL order was accepted by Delta
+    "tp_placed_time",       # unix float: when TP order was accepted by Delta
+    # Exit details (live)
+    "exit_order_id",        # which order ID actually filled (sl_oid or tp_oid)
+    "exit_fill_px_delta",   # actual fill price from Delta order (vs market price at detection)
+    # Additional slippage metrics
+    "entry_slippage_pct",   # entry slippage as % of fill price
 ]
 
 RECON_HEADERS = [
@@ -202,8 +214,20 @@ RECON_HEADERS = [
     "recovery_event", "recovery_reason",
 ]
 
+LIFECYCLE_HEADERS = [
+    "trade_id", "timestamp_ist", "unix_ts",
+    "event",        # ENTRY_SENT, ENTRY_ACKED, SL_SENT, SL_ACKED, TP_SENT, TP_ACKED,
+                    # SL_CANCELLED, TP_CANCELLED, EXIT_DETECTED, EXIT_CONFIRMED, MONITOR_FLAT
+    "order_id",
+    "side",
+    "qty",
+    "price",
+    "latency_from_prev_ms",  # ms since previous event for this trade
+    "notes",
+]
+
 def _init_csvs():
-    for fpath, headers in [(CSV_FILE, CSV_HEADERS), (RECON_FILE, RECON_HEADERS)]:
+    for fpath, headers in [(CSV_FILE, CSV_HEADERS), (RECON_FILE, RECON_HEADERS), (LIFECYCLE_FILE, LIFECYCLE_HEADERS)]:
         if fpath.exists():
             try:
                 with open(fpath, "r", newline="") as f:
@@ -226,6 +250,32 @@ def _append_csv(fpath: Path, headers: list, row: dict):
             csv.DictWriter(f, fieldnames=headers, extrasaction="ignore").writerow(row)
     except Exception as e:
         _loge(f"CSV write error ({fpath.name}): {e}")
+
+_lifecycle_last_ts: dict = {}   # trade_id → last event unix_ts (for latency_from_prev)
+
+def _log_lifecycle(trade_id: str, event: str, order_id: str = "",
+                   side: str = "", qty: float = 0, price: float = 0, notes: str = ""):
+    """Write one row to order_lifecycle.csv. Call for every order placement/fill/cancel event."""
+    now_unix = time.time()
+    now_ist  = (datetime.utcnow() + timedelta(seconds=19800)).strftime("%d/%m/%Y %H:%M:%S.%f")[:-3]
+    prev_ts  = _lifecycle_last_ts.get(trade_id, now_unix)
+    lat_ms   = round((now_unix - prev_ts) * 1000, 1) if trade_id in _lifecycle_last_ts else 0
+    _lifecycle_last_ts[trade_id] = now_unix
+
+    row = {
+        "trade_id":           trade_id,
+        "timestamp_ist":      now_ist,
+        "unix_ts":            round(now_unix, 3),
+        "event":              event,
+        "order_id":           order_id or "",
+        "side":               side,
+        "qty":                qty or "",
+        "price":              price or "",
+        "latency_from_prev_ms": lat_ms,
+        "notes":              notes,
+    }
+    _append_csv(LIFECYCLE_FILE, LIFECYCLE_HEADERS, row)
+    log.info(f"[LIFECYCLE][{trade_id}] {event} oid={order_id or '—'} price={price or '—'} +{lat_ms:.0f}ms")
 
 _init_csvs()
 
@@ -379,18 +429,25 @@ def place_market_order(side: str, size: float, reduce_only: bool = False) -> Opt
         "time_in_force": "ioc",
         "reduce_only":   reduce_only,
     }
+    api_req_t = time.time()
     resp = _post("/v2/orders", body)
+    api_ack_t = time.time()
     if not resp:
         return None
     result = resp.get("result", {})
     status = result.get("state", resp.get("status", ""))
     if status in ("accepted", "filled", "open"):
         avg = result.get("average_fill_price") or result.get("limit_price")
-        return {"order_id": result.get("id"), "fill_price": float(avg) if avg else None}
+        return {
+            "order_id":       result.get("id"),
+            "fill_price":     float(avg) if avg else None,
+            "api_request_time": api_req_t,
+            "api_ack_time":   api_ack_t,
+        }
     _loge(f"market order rejected: {resp}")
     return None
 
-def place_sl_order(close_side: str, size: float, sl_price: float) -> Optional[str]:
+def place_sl_order(close_side: str, size: float, sl_price: float) -> Optional[dict]:
     body = {
         "product_id":    PRODUCT_ID,
         "size":          size,
@@ -400,13 +457,15 @@ def place_sl_order(close_side: str, size: float, sl_price: float) -> Optional[st
         "reduce_only":   True,
         "time_in_force": "gtc",
     }
+    t_sent = time.time()
     resp = _post("/v2/orders", body)
+    t_ack  = time.time()
     if resp and resp.get("result", {}).get("id"):
-        return str(resp["result"]["id"])
+        return {"order_id": str(resp["result"]["id"]), "placed_time": t_ack}
     _loge(f"SL order failed: {resp}")
     return None
 
-def place_tp_order(close_side: str, size: float, tp_price: float) -> Optional[str]:
+def place_tp_order(close_side: str, size: float, tp_price: float) -> Optional[dict]:
     body = {
         "product_id":    PRODUCT_ID,
         "size":          size,
@@ -416,9 +475,11 @@ def place_tp_order(close_side: str, size: float, tp_price: float) -> Optional[st
         "reduce_only":   True,
         "time_in_force": "gtc",
     }
+    t_sent = time.time()
     resp = _post("/v2/orders", body)
+    t_ack  = time.time()
     if resp and resp.get("result", {}).get("id"):
-        return str(resp["result"]["id"])
+        return {"order_id": str(resp["result"]["id"]), "placed_time": t_ack}
     _loge(f"TP order failed: {resp}")
     return None
 
@@ -574,6 +635,11 @@ def _set_open_trade(
     sl_oid: Optional[str], tp_oid: Optional[str],
     pine_signal_time: int, webhook_recv_time: float, entry_fill_time: float,
     signal_timeframe: str = "", signal_tf_bar_time: int = 0,
+    entry_order_id: Optional[str] = None,
+    api_request_time: Optional[float] = None,
+    api_ack_time: Optional[float] = None,
+    sl_placed_time: Optional[float] = None,
+    tp_placed_time: Optional[float] = None,
 ):
     global open_trade
     d = direction
@@ -590,6 +656,8 @@ def _set_open_trade(
 
     _ratio = round(abs(entry_slippage) / sl_dist, 3) if sl_dist > 0 else 0.0
     _grade = _structure_grade(_ratio)
+
+    _slippage_pct = round(abs(entry_slippage) / fill_price * 100, 4) if fill_price else 0.0
 
     open_trade = {
         "trade_id":           trade_id,
@@ -620,12 +688,29 @@ def _set_open_trade(
         # Quality
         "slippage_ratio":     _ratio,
         "structure_grade":    _grade,
+        "entry_slippage_pct": _slippage_pct,
         # Recovery tracking
         "recovery_event":     False,
         "recovery_reason":    "",
+        # Entry order lifecycle fields (live only)
+        "entry_order_id":     entry_order_id,
+        "api_request_time":   api_request_time,
+        "api_ack_time":       api_ack_time,
+        "sl_placed_time":     sl_placed_time,
+        "tp_placed_time":     tp_placed_time,
+        # Exit fields (populated at close time)
+        "exit_order_id":      None,
+        "exit_fill_px_delta": None,
     }
 
     save_state()
+
+    # Lifecycle events
+    _log_lifecycle(trade_id, "ENTRY_ACKED", order_id=entry_order_id or "", side=d.lower(), qty=LOT_SIZE, price=fill_price, notes=f"slip={entry_slippage:+.2f}pts grade={_grade}")
+    if sl_oid:
+        _log_lifecycle(trade_id, "SL_PLACED", order_id=sl_oid, side="sell" if d == "BUY" else "buy", qty=LOT_SIZE, price=sl_price)
+    if tp_oid:
+        _log_lifecycle(trade_id, "TP_PLACED", order_id=tp_oid, side="sell" if d == "BUY" else "buy", qty=LOT_SIZE, price=tp_price)
 
     _log(
         f"STATE→ENTERED | {d} fill={fill_price} slip={entry_slippage:+.2f}pts "
@@ -660,6 +745,8 @@ def _close_trade(exit_price: float, exit_type: str, exit_slippage: float = 0.0):
     global open_trade
     if not open_trade:
         return
+
+    _log_lifecycle(open_trade["trade_id"], "EXIT_DETECTED", price=exit_price, notes=exit_type)
 
     trade    = open_trade
     d        = trade["direction"]
@@ -702,6 +789,14 @@ def _close_trade(exit_price: float, exit_type: str, exit_slippage: float = 0.0):
         "monitor_cycles_total":  monitor_cycles,
         "recovery_event":        trade.get("recovery_event", False),
         "recovery_reason":       trade.get("recovery_reason", ""),
+        "entry_order_id":        trade.get("entry_order_id", ""),
+        "api_request_time":      trade.get("api_request_time", ""),
+        "api_ack_time":          trade.get("api_ack_time", ""),
+        "sl_placed_time":        trade.get("sl_placed_time", ""),
+        "tp_placed_time":        trade.get("tp_placed_time", ""),
+        "exit_order_id":         trade.get("exit_order_id", ""),
+        "exit_fill_px_delta":    trade.get("exit_fill_px_delta", ""),
+        "entry_slippage_pct":    trade.get("entry_slippage_pct", ""),
     }
     _append_csv(CSV_FILE, CSV_HEADERS, row)
     _write_reconciliation(trade, python_outcome, pts, exit_slippage, trade_duration_sec)
@@ -780,13 +875,48 @@ def _position_monitor():
                 # LIVE: detect position flat (Delta filled TP limit or SL stop)
                 pos = get_open_position()
                 if pos is None:
-                    _logw(f"[LIVE] Position flat detected — approx_exit={price}")
-                    # Cancel whichever order is still open (the one not filled)
+                    _logw(f"[LIVE] Position flat detected @ approx market price={price}")
+                    _log_lifecycle(open_trade["trade_id"], "MONITOR_FLAT", notes=f"approx_price={price}")
+
+                    # Determine which order actually filled and get real fill price
+                    exit_fill_px    = price   # fallback to market price
+                    exit_order_id   = None
+                    exit_label      = "AUTO_EXIT"
+
+                    for oid_key, label in [("tp_oid", "TP_LIVE"), ("sl_oid", "SL_LIVE")]:
+                        oid = open_trade.get(oid_key)
+                        if not oid:
+                            continue
+                        order_resp = _get(f"/v2/orders/{oid}")
+                        if order_resp:
+                            result_data = order_resp.get("result", {})
+                            state = result_data.get("state", "")
+                            if state in ("filled", "closed"):
+                                raw_fill = result_data.get("average_fill_price")
+                                if raw_fill:
+                                    exit_fill_px  = float(raw_fill)
+                                    exit_order_id = oid
+                                    exit_label    = label
+                                    _log(f"[LIVE] {label} confirmed: oid={oid} fill={exit_fill_px}")
+                                    _log_lifecycle(open_trade["trade_id"], "EXIT_CONFIRMED",
+                                                   order_id=oid, price=exit_fill_px, notes=label)
+                                break  # found the filled order
+
+                    if exit_order_id is None:
+                        _logw(f"[LIVE] Could not confirm which order filled — using market price {exit_fill_px}")
+
+                    # Store exit_order_id in trade before closing
+                    open_trade["exit_order_id"]      = exit_order_id
+                    open_trade["exit_fill_px_delta"]  = exit_fill_px
+
+                    # Cancel the remaining open order
                     for oid_key in ("sl_oid", "tp_oid"):
                         oid = open_trade.get(oid_key)
-                        if oid:
+                        if oid and oid != exit_order_id:
                             _delete(f"/v2/orders/{oid}")
-                    _close_trade(price, "AUTO_EXIT", 0.0)
+                            _log_lifecycle(open_trade["trade_id"], f"{oid_key.upper().replace('_OID', '')}_CANCELLED", order_id=oid)
+
+                    _close_trade(exit_fill_px, exit_label, 0.0)
                     break
 
     log.info("[MON] stopped")
@@ -808,6 +938,8 @@ def _process_entry(
 
         fill_px = None
         sl_oid  = tp_oid = None
+        entry_order_id = api_request_time = api_ack_time = None
+        sl_placed_t = tp_placed_t = None
 
         # Latency guard (PAPER + LIVE) — check before doing anything
         wh_latency_ms = round((recv_time - pine_time / 1000) * 1000, 1)
@@ -831,11 +963,19 @@ def _process_entry(
         else:
             # Live: market entry
             side   = "buy" if d == "BUY" else "sell"
+            _log_lifecycle(trade_id, "ENTRY_SENT", side=side, qty=LOT_SIZE, price=pine_entry_px, notes=f"pine_ref={pine_entry_px}")
             result = place_market_order(side, LOT_SIZE)
             if not result:
                 _loge("Entry market order FAILED — aborting")
                 tg(f"❌ ENTRY FAILED [{d}] — market order rejected by Delta")
                 return
+
+            if result:
+                entry_order_id   = str(result.get("order_id", ""))
+                api_request_time = result.get("api_request_time")
+                api_ack_time     = result.get("api_ack_time")
+            else:
+                entry_order_id = api_request_time = api_ack_time = None
 
             fill_px = result.get("fill_price")
             if not fill_px:
@@ -850,8 +990,13 @@ def _process_entry(
             sl_price   = round(pine_sl, 1)
             tp_price   = round(pine_tp, 1)
 
-            sl_oid = place_sl_order(close_side, LOT_SIZE, sl_price)
-            tp_oid = place_tp_order(close_side, LOT_SIZE, tp_price)
+            sl_result = place_sl_order(close_side, LOT_SIZE, sl_price)
+            tp_result = place_tp_order(close_side, LOT_SIZE, tp_price)
+
+            sl_oid      = sl_result["order_id"]    if sl_result else None
+            sl_placed_t = sl_result["placed_time"]  if sl_result else None
+            tp_oid      = tp_result["order_id"]    if tp_result else None
+            tp_placed_t = tp_result["placed_time"]  if tp_result else None
 
             if not sl_oid:
                 _loge("SL ORDER FAILED after entry — CRITICAL: close position manually")
@@ -894,6 +1039,11 @@ def _process_entry(
                 entry_fill_time=entry_fill_time,
                 signal_timeframe=signal_timeframe,
                 signal_tf_bar_time=signal_tf_bar_time,
+                entry_order_id=entry_order_id,
+                api_request_time=api_request_time,
+                api_ack_time=api_ack_time,
+                sl_placed_time=sl_placed_t,
+                tp_placed_time=tp_placed_t,
             )
 
         threading.Thread(target=_position_monitor, daemon=True, name="mon").start()
