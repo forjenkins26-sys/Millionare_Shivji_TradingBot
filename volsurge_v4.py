@@ -595,8 +595,17 @@ def run_preflight() -> dict:
     status = "✅ ALL PASSED" if passed else "❌ FAILED — DO NOT TRADE LIVE"
     log.info(f"[PRE-FLIGHT] {status} | {results}")
     if not PAPER_MODE:
+        # Build summary: show ok/fail + include detail for any failed check
+        summary = {}
+        for k, v in results.items():
+            if isinstance(v, dict):
+                ok_val = v.get("ok")
+                detail = v.get("detail", "")
+                summary[k] = ok_val if ok_val else f"FAIL: {detail}"
+            else:
+                summary[k] = v
         tg(f"{'✅' if passed else '❌'} Pre-flight {'PASSED' if passed else 'FAILED'}\n"
-           f"Mode: LIVE | {json.dumps({k: v.get('ok') if isinstance(v, dict) else v for k, v in results.items()}, indent=2)}")
+           f"Mode: LIVE | {json.dumps(summary, indent=2)}")
 
     return results
 
