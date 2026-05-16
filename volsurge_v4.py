@@ -446,7 +446,10 @@ def place_market_order(side: str, size: float, reduce_only: bool = False) -> Opt
             "api_request_time": api_req_t,
             "api_ack_time":   api_ack_t,
         }
-    _loge(f"market order rejected: {resp}")
+    err_code = resp.get("error", resp.get("message", str(resp)[:300]))
+    _loge(f"market order rejected | code={err_code} | full={resp}")
+    # Store on module level so caller can include it in Telegram
+    place_market_order._last_error = str(err_code)
     return None
 
 def place_sl_order(close_side: str, size: float, sl_price: float) -> Optional[dict]:
@@ -984,8 +987,9 @@ def _process_entry(
             _log_lifecycle(trade_id, "ENTRY_SENT", side=side, qty=LOT_SIZE, price=pine_entry_px, notes=f"pine_ref={pine_entry_px}")
             result = place_market_order(side, LOT_SIZE)
             if not result:
-                _loge("Entry market order FAILED — aborting")
-                tg(f"❌ ENTRY FAILED [{d}] — market order rejected by Delta")
+                err = getattr(place_market_order, "_last_error", "unknown")
+                _loge(f"Entry market order FAILED — aborting | Delta error: {err}")
+                tg(f"❌ ENTRY FAILED [{d}]\nDelta error: <code>{err}</code>\nproduct_id={PRODUCT_ID} size={LOT_SIZE} side={side}")
                 return
 
             if result:
@@ -1298,6 +1302,30 @@ async def balance():
         return JSONResponse({"mode": "PAPER", "note": "balance N/A in paper mode"})
     resp = _get("/v2/wallet/balances")
     return JSONResponse(resp or {"error": "fetch failed"})
+
+# ── /diagnose ─────────────────────────────────────────────────────────
+# Hits Delta API directly and returns raw responses — helps debug order
+# rejections without waiting for a live signal.
+@app.get("/diagnose")
+async def diagnose():
+    if PAPER_MODE:
+        return JSONResponse({"mode": "PAPER", "note": "diagnose N/A in paper mode"})
+    out = {}
+    # 1. Wallet balance (confirms auth + balance)
+    out["balance"] = _get("/v2/wallet/balances")
+    # 2. Products — find BTCUSD perpetual and confirm product_id
+    prods = _get("/v2/products", {"contract_type": "perpetual_futures", "state": "live"})
+    if prods and "result" in prods:
+        btc_prods = [p for p in prods["result"] if "BTC" in p.get("symbol","").upper()]
+        out["btc_products"] = [{"id": p["id"], "symbol": p["symbol"], "contract_unit_currency": p.get("contract_unit_currency")} for p in btc_prods[:5]]
+    else:
+        out["btc_products"] = prods
+    # 3. Current open position for configured PRODUCT_ID
+    out["position"] = _get("/v2/positions", {"product_id": str(PRODUCT_ID)})
+    out["configured_product_id"] = PRODUCT_ID
+    out["configured_lot_size"] = LOT_SIZE
+    out["base_url"] = BASE_URL
+    return JSONResponse(out)
 
 # ── /history ──────────────────────────────────────────────────────────
 @app.get("/history")
