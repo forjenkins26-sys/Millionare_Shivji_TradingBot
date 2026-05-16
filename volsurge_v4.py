@@ -66,21 +66,21 @@ PRODUCT_ID = int(os.getenv("PRODUCT_ID", "27"))      # BTCUSD Perpetual
 LOT_SIZE           = float(os.getenv("LOT_SIZE", "0.001"))
 DELTA_MIN_SIZE_BTC = 0.001   # confirmed minimum for BTCUSD Perpetual (India)
 
-# Delta BTCUSD Perpetual uses INTEGER USD contracts (1 contract = $1 notional).
+# Delta BTCUSD Perpetual: 1 contract = 0.001 BTC face value.
 # LOT_SIZE is kept in BTC for human readability.
-# At order time: contracts = int(LOT_SIZE * current_price), minimum 1.
+# At order time: contracts = int(LOT_SIZE / 0.001), minimum 1.
 # Override LOT_SIZE_CONTRACTS in Railway to pin a fixed contract count directly.
+DELTA_CONTRACT_SIZE_BTC = 0.001   # 1 contract = 0.001 BTC (Delta Exchange India BTCUSD Perp)
 LOT_SIZE_CONTRACTS = int(os.getenv("LOT_SIZE_CONTRACTS", "0"))  # 0 = auto-calc from BTC
 
 def _btc_to_contracts(btc_size: float, ref_price: Optional[float] = None) -> int:
-    """Convert BTC lot size to integer USD contracts for Delta API.
-    1 contract = $1 USD notional on BTCUSD perpetual.
+    """Convert BTC lot size to integer contracts for Delta API.
+    1 contract = 0.001 BTC on BTCUSD perpetual (Delta Exchange India).
     """
     if LOT_SIZE_CONTRACTS > 0:
         return LOT_SIZE_CONTRACTS   # pinned override
-    price = ref_price or fetch_price() or 78000
-    contracts = max(1, int(btc_size * price))
-    log.info(f"[SIZE] {btc_size} BTC × ${price:,.0f} = {contracts} contracts")
+    contracts = max(1, round(btc_size / DELTA_CONTRACT_SIZE_BTC))
+    log.info(f"[SIZE] {btc_size} BTC ÷ {DELTA_CONTRACT_SIZE_BTC} BTC/contract = {contracts} contracts")
     return contracts
 
 TP_R = 2.0   # TP = entry ± sl_dist × 2.0  (2R)
