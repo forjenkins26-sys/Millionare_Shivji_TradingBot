@@ -66,6 +66,23 @@ PRODUCT_ID = int(os.getenv("PRODUCT_ID", "27"))      # BTCUSD Perpetual
 LOT_SIZE           = float(os.getenv("LOT_SIZE", "0.001"))
 DELTA_MIN_SIZE_BTC = 0.001   # confirmed minimum for BTCUSD Perpetual (India)
 
+# Delta BTCUSD Perpetual uses INTEGER USD contracts (1 contract = $1 notional).
+# LOT_SIZE is kept in BTC for human readability.
+# At order time: contracts = int(LOT_SIZE * current_price), minimum 1.
+# Override LOT_SIZE_CONTRACTS in Railway to pin a fixed contract count directly.
+LOT_SIZE_CONTRACTS = int(os.getenv("LOT_SIZE_CONTRACTS", "0"))  # 0 = auto-calc from BTC
+
+def _btc_to_contracts(btc_size: float, ref_price: Optional[float] = None) -> int:
+    """Convert BTC lot size to integer USD contracts for Delta API.
+    1 contract = $1 USD notional on BTCUSD perpetual.
+    """
+    if LOT_SIZE_CONTRACTS > 0:
+        return LOT_SIZE_CONTRACTS   # pinned override
+    price = ref_price or fetch_price() or 78000
+    contracts = max(1, int(btc_size * price))
+    log.info(f"[SIZE] {btc_size} BTC × ${price:,.0f} = {contracts} contracts")
+    return contracts
+
 TP_R = 2.0   # TP = entry ± sl_dist × 2.0  (2R)
 
 # Entry guards — reject trade if either threshold is breached.
@@ -422,10 +439,11 @@ def get_open_position() -> Optional[dict]:
         return result if size != 0 else None
     return None
 
-def place_market_order(side: str, size: float, reduce_only: bool = False) -> Optional[dict]:
+def place_market_order(side: str, size: float, reduce_only: bool = False, ref_price: Optional[float] = None) -> Optional[dict]:
+    contracts = _btc_to_contracts(size, ref_price)
     body = {
         "product_id":    PRODUCT_ID,
-        "size":          size,
+        "size":          contracts,       # integer USD contracts, not BTC float
         "side":          side.lower(),
         "order_type":    "market_order",
         "time_in_force": "ioc",
@@ -452,10 +470,11 @@ def place_market_order(side: str, size: float, reduce_only: bool = False) -> Opt
     place_market_order._last_error = str(err_code)
     return None
 
-def place_sl_order(close_side: str, size: float, sl_price: float) -> Optional[dict]:
+def place_sl_order(close_side: str, size: float, sl_price: float, contracts: Optional[int] = None) -> Optional[dict]:
+    sz = contracts if contracts else _btc_to_contracts(size)
     body = {
         "product_id":    PRODUCT_ID,
-        "size":          size,
+        "size":          sz,
         "side":          close_side.lower(),
         "order_type":    "stop_market_order",
         "stop_price":    str(round(sl_price, 1)),
@@ -470,10 +489,11 @@ def place_sl_order(close_side: str, size: float, sl_price: float) -> Optional[di
     _loge(f"SL order failed: {resp}")
     return None
 
-def place_tp_order(close_side: str, size: float, tp_price: float) -> Optional[dict]:
+def place_tp_order(close_side: str, size: float, tp_price: float, contracts: Optional[int] = None) -> Optional[dict]:
+    sz = contracts if contracts else _btc_to_contracts(size)
     body = {
         "product_id":    PRODUCT_ID,
-        "size":          size,
+        "size":          sz,
         "side":          close_side.lower(),
         "order_type":    "limit_order",
         "limit_price":   str(round(tp_price, 1)),
@@ -984,12 +1004,13 @@ def _process_entry(
         else:
             # Live: market entry
             side   = "buy" if d == "BUY" else "sell"
-            _log_lifecycle(trade_id, "ENTRY_SENT", side=side, qty=LOT_SIZE, price=pine_entry_px, notes=f"pine_ref={pine_entry_px}")
-            result = place_market_order(side, LOT_SIZE)
+            entry_contracts = _btc_to_contracts(LOT_SIZE, pine_entry_px)
+            _log_lifecycle(trade_id, "ENTRY_SENT", side=side, qty=entry_contracts, price=pine_entry_px, notes=f"pine_ref={pine_entry_px} contracts={entry_contracts}")
+            result = place_market_order(side, LOT_SIZE, ref_price=pine_entry_px)
             if not result:
                 err = getattr(place_market_order, "_last_error", "unknown")
                 _loge(f"Entry market order FAILED — aborting | Delta error: {err}")
-                tg(f"❌ ENTRY FAILED [{d}]\nDelta error: <code>{err}</code>\nproduct_id={PRODUCT_ID} size={LOT_SIZE} side={side}")
+                tg(f"❌ ENTRY FAILED [{d}]\nDelta error: <code>{err}</code>\nproduct_id={PRODUCT_ID} contracts={entry_contracts} side={side}")
                 return
 
             if result:
@@ -1012,8 +1033,8 @@ def _process_entry(
             sl_price   = round(pine_sl, 1)
             tp_price   = round(pine_tp, 1)
 
-            sl_result = place_sl_order(close_side, LOT_SIZE, sl_price)
-            tp_result = place_tp_order(close_side, LOT_SIZE, tp_price)
+            sl_result = place_sl_order(close_side, LOT_SIZE, sl_price, contracts=entry_contracts)
+            tp_result = place_tp_order(close_side, LOT_SIZE, tp_price, contracts=entry_contracts)
 
             sl_oid      = sl_result["order_id"]    if sl_result else None
             sl_placed_t = sl_result["placed_time"]  if sl_result else None
