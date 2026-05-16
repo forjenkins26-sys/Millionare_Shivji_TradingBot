@@ -346,6 +346,8 @@ def _get(path: str, params: Optional[dict] = None):
     try:
         r = requests.get(BASE_URL + path + qs,
                          headers=_sign("GET", path, qs), timeout=10)
+        if r.status_code != 200:
+            _loge(f"GET {path} HTTP {r.status_code} | body: {r.text[:300]}")
         return r.json()
     except Exception as e:
         _loge(f"GET {path} error: {e}")
@@ -525,13 +527,19 @@ def run_preflight() -> dict:
 
     resp = _get("/v2/profile")
     ok   = resp is not None and "result" in resp
-    results["api_auth"] = {
-        "ok":     ok,
-        "detail": resp.get("result", {}).get("email", "?") if ok else str(resp),
-    }
+    auth_detail = ""
+    if ok:
+        auth_detail = resp.get("result", {}).get("email", "?")
+    else:
+        # Log the exact Delta rejection reason (ip_not_whitelisted, invalid_signature, etc.)
+        if resp is None:
+            auth_detail = "no_response_or_connection_error"
+        else:
+            auth_detail = resp.get("error", resp.get("message", str(resp)[:200]))
+        _loge(f"PRE-FLIGHT FAIL: API auth rejected — Delta says: {auth_detail}")
+    results["api_auth"] = {"ok": ok, "detail": auth_detail}
     if not ok:
         passed = False
-        _loge("PRE-FLIGHT FAIL: API authentication failed")
 
     price = fetch_price()
     ok    = price is not None
@@ -564,10 +572,11 @@ def run_preflight() -> dict:
     if not PAPER_MODE:
         bal = _get("/v2/wallet/balances")
         ok  = bal is not None and "result" in bal
-        results["balance_fetch"] = {"ok": ok}
+        bal_detail = bal.get("error", bal.get("message", "")) if bal else "no_response"
+        results["balance_fetch"] = {"ok": ok, "detail": bal_detail if not ok else "ok"}
         if not ok:
             passed = False
-            _loge("PRE-FLIGHT FAIL: balance fetch failed")
+            _loge(f"PRE-FLIGHT FAIL: balance fetch failed — Delta says: {bal_detail}")
 
     ok = LOT_SIZE >= DELTA_MIN_SIZE_BTC
     results["lot_size"] = {
