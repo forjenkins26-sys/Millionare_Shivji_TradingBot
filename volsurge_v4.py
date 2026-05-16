@@ -58,7 +58,7 @@ TG_CHAT        = os.getenv("TELEGRAM_CHAT_ID",      "")
 
 PAPER_MODE = os.getenv("PAPER_MODE", "true").lower() == "true"
 
-BASE_URL   = "https://api.india.delta.exchange"
+BASE_URL   = os.getenv("DELTA_BASE_URL", "https://api.delta.exchange")
 PRODUCT_ID = int(os.getenv("PRODUCT_ID", "27"))      # BTCUSD Perpetual
 
 # Full position size. No PARTIAL_LOT needed — single full exit only.
