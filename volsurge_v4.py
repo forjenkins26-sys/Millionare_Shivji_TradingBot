@@ -1311,17 +1311,44 @@ async def diagnose():
     if PAPER_MODE:
         return JSONResponse({"mode": "PAPER", "note": "diagnose N/A in paper mode"})
     out = {}
-    # 1. Wallet balance (confirms auth + balance)
-    out["balance"] = _get("/v2/wallet/balances")
-    # 2. Products — find BTCUSD perpetual and confirm product_id
-    prods = _get("/v2/products", {"contract_type": "perpetual_futures", "state": "live"})
-    if prods and "result" in prods:
-        btc_prods = [p for p in prods["result"] if "BTC" in p.get("symbol","").upper()]
-        out["btc_products"] = [{"id": p["id"], "symbol": p["symbol"], "contract_unit_currency": p.get("contract_unit_currency")} for p in btc_prods[:5]]
+    # 1. Wallet balance — check USD available_balance
+    bal_resp = _get("/v2/wallet/balances")
+    if bal_resp and "result" in bal_resp:
+        out["balances"] = {
+            r["asset_symbol"]: r["available_balance"]
+            for r in bal_resp["result"]
+            if float(r.get("available_balance", 0)) > 0
+        }
     else:
-        out["btc_products"] = prods
-    # 3. Current open position for configured PRODUCT_ID
-    out["position"] = _get("/v2/positions", {"product_id": str(PRODUCT_ID)})
+        out["balances"] = bal_resp
+
+    # 2. Fetch product 27 directly to confirm what it actually is
+    prod27 = _get(f"/v2/products/{PRODUCT_ID}")
+    if prod27 and "result" in prod27:
+        p = prod27["result"]
+        out["product_27_detail"] = {
+            "id": p.get("id"),
+            "symbol": p.get("symbol"),
+            "description": p.get("description"),
+            "contract_type": p.get("contract_type"),
+            "contract_unit_currency": p.get("contract_unit_currency"),
+            "tick_size": p.get("tick_size"),
+            "min_size": p.get("min_size"),
+            "state": p.get("state"),
+        }
+    else:
+        out["product_27_detail"] = prod27
+
+    # 3. Search all perpetual futures for BTC — no state filter
+    prods = _get("/v2/products", {"contract_type": "perpetual_futures"})
+    if prods and "result" in prods:
+        btc_perps = [p for p in prods["result"] if "BTC" in p.get("symbol", "").upper() or "BTC" in p.get("description", "").upper()]
+        out["btc_perpetuals"] = [{"id": p["id"], "symbol": p["symbol"], "description": p.get("description",""), "min_size": p.get("min_size"), "state": p.get("state")} for p in btc_perps[:10]]
+    else:
+        out["btc_perpetuals"] = prods
+
+    # 4. Current position
+    out["position_product_27"] = _get("/v2/positions", {"product_id": str(PRODUCT_ID)})
     out["configured_product_id"] = PRODUCT_ID
     out["configured_lot_size"] = LOT_SIZE
     out["base_url"] = BASE_URL
