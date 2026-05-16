@@ -1379,228 +1379,464 @@ async def test_telegram():
 # ── /dashboard ────────────────────────────────────────────────────────
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard():
-    """Trade journal dashboard — reads trades.csv + any v3 backup files."""
+    """Live execution dashboard — Pine parity, latency, profitability insights, trade journal."""
+    # ── Load trades ──────────────────────────────────────────────────────
     trades = []
-    # Read current v4 trades
     try:
-        with open(CSV_FILE, "r") as f:
+        with open(CSV_FILE, "r", encoding="utf-8") as f:
             trades = list(csv.DictReader(f))
     except Exception:
         pass
-    # Also read any v3 backup files and merge (oldest first)
     try:
-        backup_files = sorted(DATA_DIR.glob("trades.v3_backup_*.csv"))
-        for bf in backup_files:
+        for bf in sorted(DATA_DIR.glob("trades.v3_backup_*.csv")):
             try:
-                with open(bf, "r") as f:
-                    old_rows = list(csv.DictReader(f))
-                trades = old_rows + trades   # old trades first, newer on top
+                with open(bf, "r", encoding="utf-8") as f:
+                    trades = list(csv.DictReader(f)) + trades
             except Exception:
                 pass
     except Exception:
         pass
 
-    trades_reversed = list(reversed(trades))
+    # ── Load lifecycle events (last 50) ──────────────────────────────────
+    lifecycle_rows = []
+    try:
+        with open(LIFECYCLE_FILE, "r", encoding="utf-8") as f:
+            lifecycle_rows = list(csv.DictReader(f))[-50:]
+    except Exception:
+        pass
 
-    def fmt_price(v):
-        try: return f"{float(v):,.1f}"
-        except: return v or "—"
+    # ── Snapshot current open trade ───────────────────────────────────────
+    with _state_lock:
+        ot = dict(open_trade) if open_trade else None
 
-    def fmt_pts(v):
+    now_ist = (datetime.utcnow() + timedelta(seconds=19800)).strftime("%d/%m/%Y %H:%M:%S IST")
+    mode_label = "🟢 LIVE" if not PAPER_MODE else "📄 PAPER"
+    mode_bg    = "#0a2a0a" if not PAPER_MODE else "#1a1a2a"
+    mode_col   = "#4ade80" if not PAPER_MODE else "#93c5fd"
+
+    # ── Helpers ───────────────────────────────────────────────────────────
+    def _f(v, dec=1):
+        try: return f"{float(v):,.{dec}f}"
+        except: return "—"
+
+    def _pts(v):
         try:
-            f = float(v)
-            sign = "+" if f > 0 else ""
-            return f"{sign}{f:.2f}"
-        except: return v or "—"
+            f = float(v); s = "+" if f >= 0 else ""
+            return f"{s}{f:.2f}"
+        except: return "—"
 
-    def fmt_ms(v):
-        try: return f"{float(v):.0f}"
-        except: return v or "—"
+    def _ms(v):
+        try: return f"{float(v):.0f}ms"
+        except: return "—"
 
-    def fmt_dur(v):
+    def _dur(v):
         try:
             s = int(float(v))
-            if s < 60: return f"{s}s"
-            return f"{s//60}m {s%60}s"
-        except: return v or "—"
+            return f"{s//60}m {s%60}s" if s >= 60 else f"{s}s"
+        except: return "—"
 
-    def fmt_dt(v):
+    def _dt(v):
         try:
-            return (datetime.fromisoformat(v[:19]) + timedelta(seconds=19800)).strftime("%d/%m/%Y %H:%M")
-        except: return v or "—"
+            return (datetime.fromisoformat(str(v)[:19]) + timedelta(seconds=19800)).strftime("%d/%m %H:%M")
+        except: return "—"
 
-    def outcome_badge(v):
-        if v == "TP":
-            return '<span style="background:#1a472a;color:#4ade80;padding:2px 8px;border-radius:4px;font-weight:700;font-size:11px;">TP ✓</span>'
-        if v == "SL":
-            return '<span style="background:#4a1942;color:#f87171;padding:2px 8px;border-radius:4px;font-weight:700;font-size:11px;">SL ✗</span>'
-        return v or "—"
-
-    def dir_badge(v):
-        if v == "BUY":
-            return '<span style="color:#4ade80;font-weight:700;">▲ BUY</span>'
-        if v == "SELL":
-            return '<span style="color:#f87171;font-weight:700;">▼ SELL</span>'
-        return v or "—"
-
-    def grade_badge(v):
-        colors = {"INTACT": "#4ade80", "MILD": "#facc15", "DEGRADED": "#fb923c",
-                  "BROKEN": "#f87171", "CRITICAL": "#dc2626"}
-        c = colors.get(v, "#9ca3af")
-        return f'<span style="color:{c};font-size:11px;">{v or "—"}</span>'
-
-    def pts_color(v):
+    def _pc(v):
         try:
             f = float(v)
-            if f > 0: return "color:#4ade80"
-            if f < 0: return "color:#f87171"
+            c = "#4ade80" if f > 0 else "#f87171" if f < 0 else "#9ca3af"
+            s = "+" if f >= 0 else ""
+            return f'<span style="color:{c};font-weight:700;">{s}{f:.2f}</span>'
+        except: return '<span style="color:#6b7280;">—</span>'
+
+    def _dir(v):
+        if v == "BUY":  return '<span style="color:#4ade80;font-weight:700;">▲ BUY</span>'
+        if v == "SELL": return '<span style="color:#f87171;font-weight:700;">▼ SELL</span>'
+        return "—"
+
+    def _outcome(v):
+        if v == "TP": return '<span style="background:#14532d;color:#4ade80;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;">TP ✓</span>'
+        if v == "SL": return '<span style="background:#450a0a;color:#f87171;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;">SL ✗</span>'
+        return f'<span style="color:#6b7280;">{v or "—"}</span>'
+
+    def _grade(v):
+        c = {"INTACT":"#4ade80","MILD":"#facc15","DEGRADED":"#fb923c","BROKEN":"#f87171","CRITICAL":"#dc2626"}.get(v,"#6b7280")
+        return f'<span style="color:{c};font-weight:600;font-size:11px;">{v or "—"}</span>'
+
+    def _exit_type(v):
+        if v == "TP_LIVE":   return '<span style="color:#4ade80;font-size:11px;">TP_LIVE ✓</span>'
+        if v == "SL_LIVE":   return '<span style="color:#f87171;font-size:11px;">SL_LIVE ✗</span>'
+        if v == "TP_PAPER":  return '<span style="color:#86efac;font-size:11px;">TP_PAPER</span>'
+        if v == "SL_PAPER":  return '<span style="color:#fca5a5;font-size:11px;">SL_PAPER</span>'
+        return f'<span style="color:#6b7280;font-size:11px;">{v or "—"}</span>'
+
+    # ── Stats computation ─────────────────────────────────────────────────
+    total    = len(trades)
+    tp_cnt   = sum(1 for t in trades if t.get("python_actual_outcome") == "TP")
+    sl_cnt   = sum(1 for t in trades if t.get("python_actual_outcome") == "SL")
+    pts_list = []
+    for t in trades:
+        try: pts_list.append(float(t["pts"]))
         except: pass
-        return "color:#9ca3af"
+    tot_pts  = round(sum(pts_list), 2)
+    avg_pts  = round(sum(pts_list) / len(pts_list), 2) if pts_list else 0
+    win_rt   = f"{round(tp_cnt/total*100)}%" if total else "—"
 
-    # Summary stats
-    total   = len(trades)
-    tp_cnt  = sum(1 for t in trades if t.get("python_actual_outcome") == "TP")
-    sl_cnt  = sum(1 for t in trades if t.get("python_actual_outcome") == "SL")
-    pts_all = [float(t.get("pts") or 0) for t in trades]
-    tot_pts = round(sum(pts_all), 2)
-    avg_pts = round(sum(pts_all) / len(pts_all), 2) if pts_all else 0
-    win_rt  = f"{round(tp_cnt / total * 100)}%" if total else "—"
-    avg_sl  = round(sum(float(t.get("entry_slippage_pts") or 0) for t in trades) / total, 2) if total else 0
-    avg_wh  = round(sum(float(t.get("webhook_latency_ms") or 0) for t in trades) / total, 1) if total else 0
+    slip_list = []
+    for t in trades:
+        try: slip_list.append(float(t["entry_slippage_pts"]))
+        except: pass
+    avg_slip = round(sum(slip_list)/len(slip_list), 2) if slip_list else 0
 
-    rows_html = ""
-    for i, t in enumerate(trades_reversed, 1):
-        pts_val  = t.get("pts", "")
-        outcome  = t.get("python_actual_outcome", "")
-        row_bg   = "#0d1f12" if outcome == "TP" else "#1f0d0d" if outcome == "SL" else "#111827"
-        rec_icon = "♻️" if str(t.get("recovery_event", "")).lower() == "true" else ""
+    wh_list = []
+    for t in trades:
+        try: wh_list.append(float(t["webhook_latency_ms"]))
+        except: pass
+    avg_wh = round(sum(wh_list)/len(wh_list), 1) if wh_list else 0
 
-        rows_html += f"""
-        <tr style="background:{row_bg};border-bottom:1px solid #1f2937;">
-          <td style="color:#6b7280;text-align:center;">{total - i + 1}</td>
-          <td>{dir_badge(t.get("direction",""))}</td>
-          <td style="color:#d1d5db;font-size:12px;">{fmt_dt(t.get("entry_fill_time",""))}</td>
-          <td style="color:#9ca3af;text-align:center;">{t.get("signal_timeframe","—")}</td>
-          <td style="color:#e5e7eb;text-align:right;">{fmt_price(t.get("fill_price",""))}</td>
-          <td style="color:#9ca3af;text-align:right;">{fmt_price(t.get("pine_entry_px",""))}</td>
-          <td style="color:#34d399;text-align:right;">{fmt_price(t.get("pine_tp",""))}</td>
-          <td style="color:#f87171;text-align:right;">{fmt_price(t.get("pine_sl",""))}</td>
-          <td style="color:#e5e7eb;text-align:right;">{fmt_price(t.get("exit_price",""))}</td>
-          <td style="{pts_color(pts_val)};text-align:right;font-weight:700;">{fmt_pts(pts_val)}</td>
-          <td style="{pts_color(pts_val)};text-align:right;">{fmt_pts(t.get("pnl_approx",""))}</td>
-          <td style="text-align:center;">{outcome_badge(outcome)}</td>
-          <td style="color:#9ca3af;font-size:11px;">{t.get("exit_type","—")}</td>
-          <td style="color:#facc15;text-align:right;">{fmt_pts(t.get("entry_slippage_pts",""))}</td>
-          <td style="color:#9ca3af;text-align:right;">{fmt_pts(t.get("exit_slippage_pts",""))}</td>
-          <td style="color:#60a5fa;text-align:right;">{fmt_ms(t.get("webhook_latency_ms",""))}</td>
-          <td style="color:#9ca3af;text-align:right;">{fmt_ms(t.get("entry_latency_ms",""))}</td>
-          <td style="color:#9ca3af;text-align:right;">{fmt_dur(t.get("trade_duration_sec",""))}</td>
-          <td style="text-align:center;">{grade_badge(t.get("structure_grade",""))}</td>
-          <td style="color:#9ca3af;text-align:center;">{rec_icon} {t.get("recovery_reason","") if rec_icon else "—"}</td>
+    el_list = []
+    for t in trades:
+        try: el_list.append(float(t["entry_latency_ms"]))
+        except: pass
+    avg_el = round(sum(el_list)/len(el_list), 1) if el_list else 0
+
+    # ── Pine parity stats ─────────────────────────────────────────────────
+    slip_abs = [abs(s) for s in slip_list]
+    worst_slip = sorted(slip_abs, reverse=True)[:3]
+    grade_counts = {}
+    for t in trades:
+        g = t.get("structure_grade","")
+        if g: grade_counts[g] = grade_counts.get(g, 0) + 1
+    grade_order = ["INTACT","MILD","DEGRADED","BROKEN","CRITICAL"]
+
+    # Win rate by structure grade
+    grade_wr = {}
+    for g in grade_order:
+        g_trades = [t for t in trades if t.get("structure_grade") == g]
+        g_tp = sum(1 for t in g_trades if t.get("python_actual_outcome") == "TP")
+        if g_trades:
+            grade_wr[g] = (len(g_trades), g_tp, round(g_tp/len(g_trades)*100))
+
+    # Win rate by direction
+    buy_trades  = [t for t in trades if t.get("direction") == "BUY"]
+    sell_trades = [t for t in trades if t.get("direction") == "SELL"]
+    buy_wr  = f"{round(sum(1 for t in buy_trades  if t.get('python_actual_outcome')=='TP')/len(buy_trades)*100)}%"  if buy_trades  else "—"
+    sell_wr = f"{round(sum(1 for t in sell_trades if t.get('python_actual_outcome')=='TP')/len(sell_trades)*100)}%" if sell_trades else "—"
+
+    # Avg pts on TP vs SL
+    tp_pts = [float(t["pts"]) for t in trades if t.get("python_actual_outcome")=="TP" and t.get("pts")]
+    sl_pts = [float(t["pts"]) for t in trades if t.get("python_actual_outcome")=="SL" and t.get("pts")]
+    avg_tp_pts = round(sum(tp_pts)/len(tp_pts), 1) if tp_pts else 0
+    avg_sl_pts = round(sum(sl_pts)/len(sl_pts), 1) if sl_pts else 0
+
+    # Hypothetical: what if we skipped DEGRADED+ entries?
+    clean_trades = [t for t in trades if t.get("structure_grade") in ("INTACT","MILD","")]
+    clean_tp  = sum(1 for t in clean_trades if t.get("python_actual_outcome") == "TP")
+    clean_wr  = f"{round(clean_tp/len(clean_trades)*100)}%" if clean_trades else "—"
+
+    # ── Open trade panel ─────────────────────────────────────────────────
+    open_panel = ""
+    if ot:
+        d         = ot.get("direction","?")
+        fill_px   = ot.get("fill_price", 0)
+        pine_px   = ot.get("pine_entry_px", 0)
+        sl_px     = ot.get("sl_price", 0)
+        tp_px     = ot.get("tp_price", 0)
+        slip      = ot.get("entry_slippage_pts", 0)
+        wh_l      = ot.get("webhook_latency_ms", 0)
+        en_l      = ot.get("entry_latency_ms", 0)
+        grade_v   = ot.get("structure_grade","?")
+        sl_oid    = ot.get("sl_oid","—")
+        tp_oid    = ot.get("tp_oid","—")
+        en_oid    = ot.get("entry_order_id","—")
+        grade_col = {"INTACT":"#4ade80","MILD":"#facc15","DEGRADED":"#fb923c","BROKEN":"#f87171","CRITICAL":"#dc2626"}.get(grade_v,"#9ca3af")
+        dir_col   = "#4ade80" if d == "BUY" else "#f87171"
+        elapsed   = round(time.time() - ot.get("entry_fill_time", time.time()))
+        elapsed_s = f"{elapsed//60}m {elapsed%60}s" if elapsed >= 60 else f"{elapsed}s"
+        live_px   = fetch_price() or 0
+        unreal    = round((live_px - fill_px) if d == "BUY" else (fill_px - live_px), 1) if live_px else 0
+        unreal_col = "#4ade80" if unreal >= 0 else "#f87171"
+
+        open_panel = f"""
+<div style="background:#0a1f0a;border:2px solid #166534;border-radius:10px;margin:0 24px 20px;padding:16px 20px;">
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;">
+    <span style="background:#166534;color:#4ade80;padding:3px 10px;border-radius:4px;font-size:12px;font-weight:700;">🔴 LIVE TRADE OPEN</span>
+    <span style="color:{dir_col};font-size:18px;font-weight:700;">{'▲' if d=='BUY' else '▼'} {d}</span>
+    <span style="color:#6b7280;font-size:12px;">in trade for {elapsed_s}</span>
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;">
+    <div><div style="color:#6b7280;font-size:10px;text-transform:uppercase;">Fill Price</div><div style="color:#f9fafb;font-size:16px;font-weight:700;">{_f(fill_px)}</div></div>
+    <div><div style="color:#6b7280;font-size:10px;text-transform:uppercase;">Pine Ref</div><div style="color:#9ca3af;font-size:16px;">{_f(pine_px)}</div></div>
+    <div><div style="color:#6b7280;font-size:10px;text-transform:uppercase;">Live Price</div><div style="color:#60a5fa;font-size:16px;font-weight:700;">{_f(live_px)}</div></div>
+    <div><div style="color:#6b7280;font-size:10px;text-transform:uppercase;">Unrealized</div><div style="color:{unreal_col};font-size:16px;font-weight:700;">{'+' if unreal>=0 else ''}{unreal:.1f} pts</div></div>
+    <div><div style="color:#6b7280;font-size:10px;text-transform:uppercase;">SL Level</div><div style="color:#f87171;font-size:16px;">{_f(sl_px)}</div></div>
+    <div><div style="color:#6b7280;font-size:10px;text-transform:uppercase;">TP Level</div><div style="color:#4ade80;font-size:16px;">{_f(tp_px)}</div></div>
+    <div><div style="color:#6b7280;font-size:10px;text-transform:uppercase;">Entry Slippage</div><div style="color:#facc15;font-size:16px;">{'+' if float(slip or 0)>=0 else ''}{float(slip or 0):.2f} pts</div></div>
+    <div><div style="color:#6b7280;font-size:10px;text-transform:uppercase;">Structure Grade</div><div style="color:{grade_col};font-size:16px;font-weight:700;">{grade_v}</div></div>
+    <div><div style="color:#6b7280;font-size:10px;text-transform:uppercase;">WH Latency</div><div style="color:#60a5fa;font-size:14px;">{float(wh_l or 0):.0f}ms</div></div>
+    <div><div style="color:#6b7280;font-size:10px;text-transform:uppercase;">Entry Latency</div><div style="color:#60a5fa;font-size:14px;">{float(en_l or 0):.0f}ms</div></div>
+    <div><div style="color:#6b7280;font-size:10px;text-transform:uppercase;">Entry Order ID</div><div style="color:#6b7280;font-size:11px;font-family:monospace;">{en_oid or '—'}</div></div>
+    <div><div style="color:#6b7280;font-size:10px;text-transform:uppercase;">SL / TP Order</div><div style="color:#6b7280;font-size:11px;font-family:monospace;">{str(sl_oid)[:8] if sl_oid else '—'} / {str(tp_oid)[:8] if tp_oid else '—'}</div></div>
+  </div>
+</div>"""
+
+    # ── Pine parity panel ─────────────────────────────────────────────────
+    grade_rows = ""
+    for g in grade_order:
+        cnt = grade_counts.get(g, 0)
+        pct = round(cnt/total*100) if total else 0
+        wr_data = grade_wr.get(g)
+        wr_str  = f"{wr_data[2]}%" if wr_data else "—"
+        col = {"INTACT":"#4ade80","MILD":"#facc15","DEGRADED":"#fb923c","BROKEN":"#f87171","CRITICAL":"#dc2626"}.get(g,"#6b7280")
+        bar = "█" * min(pct, 30)
+        grade_rows += f"""<tr>
+          <td style="color:{col};font-weight:600;">{g}</td>
+          <td style="color:#e2e8f0;text-align:right;">{cnt}</td>
+          <td style="color:#9ca3af;text-align:right;">{pct}%</td>
+          <td style="color:#e2e8f0;text-align:right;">{wr_str}</td>
+          <td style="color:{col};font-size:10px;letter-spacing:1px;">{bar}</td>
         </tr>"""
 
-    empty_msg = "" if trades else '<tr><td colspan="20" style="text-align:center;color:#6b7280;padding:40px;">No trades recorded yet. Waiting for first signal...</td></tr>'
+    worst_slip_str = " / ".join([f"{w:.1f}pts" for w in worst_slip]) if worst_slip else "—"
+    clean_note = f"If INTACT+MILD only → WR {clean_wr} ({len(clean_trades)} trades)" if clean_trades else "No data yet"
+
+    # ── Lifecycle events table ────────────────────────────────────────────
+    lc_rows = ""
+    for e in reversed(lifecycle_rows[-20:]):
+        ev   = e.get("event","")
+        ev_col = "#4ade80" if "TP" in ev or "ACKED" in ev else "#f87171" if "SL" in ev or "CANCEL" in ev else "#60a5fa"
+        lc_rows += f"""<tr style="border-bottom:1px solid #1f2937;">
+          <td style="color:#6b7280;font-size:11px;">{e.get('timestamp_ist','')}</td>
+          <td style="color:{ev_col};font-weight:600;font-size:11px;">{ev}</td>
+          <td style="color:#9ca3af;font-size:11px;font-family:monospace;">{e.get('trade_id','')[:16]}</td>
+          <td style="color:#e2e8f0;text-align:right;">{_f(e.get('price',''))}</td>
+          <td style="color:#60a5fa;text-align:right;">{e.get('latency_from_prev_ms','')}</td>
+          <td style="color:#6b7280;font-size:11px;font-family:monospace;">{str(e.get('order_id',''))[:12]}</td>
+          <td style="color:#6b7280;font-size:11px;">{e.get('notes','')}</td>
+        </tr>"""
+
+    lc_empty = "" if lc_rows else '<tr><td colspan="7" style="color:#4b5563;text-align:center;padding:16px;">No lifecycle events yet — starts recording on first live entry</td></tr>'
+
+    # ── Trade journal rows ────────────────────────────────────────────────
+    journal_rows = ""
+    for i, t in enumerate(reversed(trades), 1):
+        outcome = t.get("python_actual_outcome","")
+        rbg = "#0a1a0a" if outcome=="TP" else "#1a0a0a" if outcome=="SL" else "#0d1117"
+        rec = "♻️" if str(t.get("recovery_event","")).lower()=="true" else ""
+        en_oid_s = str(t.get("entry_order_id","") or "")
+        ex_oid_s = str(t.get("exit_order_id","") or "")
+        ex_delta = t.get("exit_fill_px_delta","")
+        slip_pct = t.get("entry_slippage_pct","")
+        journal_rows += f"""
+        <tr style="background:{rbg};border-bottom:1px solid #1f2937;">
+          <td style="color:#6b7280;text-align:center;">{len(trades)-i+1}</td>
+          <td>{_dir(t.get('direction',''))}</td>
+          <td style="color:#d1d5db;font-size:11px;">{_dt(t.get('entry_fill_time',''))}</td>
+          <td style="color:#9ca3af;text-align:center;">{t.get('signal_timeframe','—')}</td>
+          <td style="color:#e5e7eb;text-align:right;">{_f(t.get('fill_price',''))}</td>
+          <td style="color:#9ca3af;text-align:right;">{_f(t.get('pine_entry_px',''))}</td>
+          <td style="color:#34d399;text-align:right;">{_f(t.get('pine_tp',''))}</td>
+          <td style="color:#f87171;text-align:right;">{_f(t.get('pine_sl',''))}</td>
+          <td style="color:#e5e7eb;text-align:right;">{_f(t.get('exit_price',''))}</td>
+          <td style="color:#9ca3af;text-align:right;font-size:10px;">{_f(ex_delta) if ex_delta else '—'}</td>
+          <td style="text-align:right;">{_pc(t.get('pts',''))}</td>
+          <td style="color:#9ca3af;text-align:right;">{_pts(t.get('pnl_approx',''))}</td>
+          <td style="text-align:center;">{_outcome(outcome)}</td>
+          <td style="text-align:center;">{_exit_type(t.get('exit_type',''))}</td>
+          <td style="text-align:right;">{_pc(t.get('entry_slippage_pts',''))}</td>
+          <td style="color:#9ca3af;text-align:right;font-size:10px;">{f"{float(slip_pct):.4f}%" if slip_pct else "—"}</td>
+          <td style="color:#60a5fa;text-align:right;">{_ms(t.get('webhook_latency_ms',''))}</td>
+          <td style="color:#9ca3af;text-align:right;">{_ms(t.get('entry_latency_ms',''))}</td>
+          <td style="color:#9ca3af;text-align:right;">{_dur(t.get('trade_duration_sec',''))}</td>
+          <td style="text-align:center;">{_grade(t.get('structure_grade',''))}</td>
+          <td style="color:#6b7280;font-size:10px;font-family:monospace;">{en_oid_s[:10] or '—'}</td>
+          <td style="color:#6b7280;font-size:10px;font-family:monospace;">{ex_oid_s[:10] or '—'}</td>
+          <td style="color:#9ca3af;text-align:center;">{rec or '—'}</td>
+        </tr>"""
+
+    empty_msg = "" if trades else '<tr><td colspan="23" style="text-align:center;color:#6b7280;padding:40px;">No trades yet — waiting for first signal</td></tr>'
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Vol Surge v4 — Trade Journal</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Vol Surge v4 — Live Dashboard</title>
 <style>
-  * {{ margin:0; padding:0; box-sizing:border-box; }}
-  body {{ background:#0a0f1a; color:#e5e7eb; font-family:'Segoe UI',system-ui,sans-serif; font-size:13px; }}
-  .header {{ background:#111827; border-bottom:1px solid #1f2937; padding:16px 24px; display:flex; align-items:center; justify-content:space-between; }}
-  .header h1 {{ font-size:18px; font-weight:700; color:#f9fafb; }}
-  .header .mode {{ background:#1a3a1a; color:#4ade80; padding:4px 12px; border-radius:20px; font-size:12px; font-weight:600; }}
-  .stats {{ display:flex; gap:12px; padding:16px 24px; flex-wrap:wrap; }}
-  .stat {{ background:#111827; border:1px solid #1f2937; border-radius:8px; padding:12px 20px; min-width:130px; }}
-  .stat .label {{ color:#6b7280; font-size:11px; text-transform:uppercase; letter-spacing:0.05em; margin-bottom:4px; }}
-  .stat .value {{ font-size:22px; font-weight:700; }}
-  .stat .value.green {{ color:#4ade80; }}
-  .stat .value.red {{ color:#f87171; }}
-  .stat .value.blue {{ color:#60a5fa; }}
-  .stat .value.yellow {{ color:#facc15; }}
-  .stat .value.white {{ color:#f9fafb; }}
-  .stat .value.neutral {{ color:#e5e7eb; }}
-  .table-wrap {{ padding:0 24px 24px; overflow-x:auto; }}
-  table {{ width:100%; border-collapse:collapse; font-size:12px; }}
-  th {{ background:#111827; color:#9ca3af; font-weight:600; text-transform:uppercase; font-size:10px; letter-spacing:0.05em; padding:10px 12px; text-align:left; border-bottom:2px solid #1f2937; white-space:nowrap; position:sticky; top:0; }}
-  td {{ padding:9px 12px; white-space:nowrap; }}
-  tr:hover td {{ background:#1f2937 !important; }}
-  .refresh {{ color:#6b7280; font-size:11px; }}
-  .footer {{ text-align:center; padding:16px; color:#374151; font-size:11px; border-top:1px solid #1f2937; }}
+  *{{margin:0;padding:0;box-sizing:border-box}}
+  body{{background:#080c10;color:#e2e8f0;font-family:'Segoe UI',system-ui,monospace;font-size:13px}}
+  .hdr{{background:#0d1117;border-bottom:2px solid #1f2937;padding:14px 24px;display:flex;align-items:center;justify-content:space-between}}
+  .hdr h1{{font-size:17px;font-weight:700;color:#f9fafb}}
+  .sec{{font-size:11px;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:1px;padding:16px 24px 8px}}
+  .stats{{display:flex;gap:10px;padding:0 24px 16px;flex-wrap:wrap}}
+  .stat{{background:#0d1117;border:1px solid #1e293b;border-radius:8px;padding:12px 16px;min-width:120px}}
+  .sv{{font-size:20px;font-weight:700}}
+  .sl{{font-size:10px;color:#6b7280;margin-top:3px;text-transform:uppercase}}
+  .panel{{background:#0d1117;border:1px solid #1e293b;border-radius:8px;margin:0 24px 16px;padding:16px}}
+  .panel h3{{font-size:12px;color:#9ca3af;font-weight:600;margin-bottom:12px;text-transform:uppercase;letter-spacing:0.5px}}
+  .grid2{{display:grid;grid-template-columns:1fr 1fr;gap:16px}}
+  .grid3{{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px}}
+  table{{width:100%;border-collapse:collapse;font-size:11px}}
+  th{{background:#0d1117;color:#6b7280;font-weight:600;text-transform:uppercase;font-size:10px;padding:8px 10px;border-bottom:2px solid #1f2937;white-space:nowrap;position:sticky;top:0}}
+  td{{padding:7px 10px;white-space:nowrap;vertical-align:middle}}
+  tr:hover td{{background:#1e293b!important}}
+  .tw{{padding:0 24px 24px;overflow-x:auto}}
+  .kv{{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #1e293b;font-size:12px}}
+  .kv:last-child{{border-bottom:none}}
+  .kl{{color:#6b7280}}
+  .kv2{{color:#e2e8f0;font-weight:600}}
+  .insight{{background:#0f1f0f;border-left:3px solid #4ade80;padding:8px 12px;border-radius:4px;font-size:12px;color:#86efac;margin:4px 0}}
+  .insight.warn{{background:#1f0f0f;border-color:#f87171;color:#fca5a5}}
+  .insight.info{{background:#0f1525;border-color:#60a5fa;color:#93c5fd}}
+  .footer{{text-align:center;padding:16px;color:#374151;font-size:10px;border-top:1px solid #1f2937;margin-top:8px}}
 </style>
 <script>
-  setTimeout(() => location.reload(), 30000);
-  function updateClock() {{
-    document.getElementById('clock').textContent = new Date().toLocaleTimeString();
-  }}
-  setInterval(updateClock, 1000);
-  window.onload = updateClock;
+  setTimeout(()=>location.reload(),15000);
+  setInterval(()=>{{document.getElementById('clk').textContent=new Date().toLocaleTimeString('en-IN',{{timeZone:'Asia/Kolkata'}})}},1000);
+  window.onload=()=>document.getElementById('clk').textContent=new Date().toLocaleTimeString('en-IN',{{timeZone:'Asia/Kolkata'}});
 </script>
 </head>
 <body>
 
-<div class="header">
+<!-- HEADER -->
+<div class="hdr">
   <div>
-    <h1>📊 Vol Surge v4.0 — Trade Journal</h1>
-    <div style="color:#6b7280;font-size:12px;margin-top:4px;">BTCUSD Perpetual · Delta Exchange India · Auto-refreshes every 30s</div>
+    <h1>⚡ Vol Surge v4.0 — Live Dashboard</h1>
+    <div style="color:#6b7280;font-size:11px;margin-top:3px;">BTCUSD · Delta Exchange India · auto-refresh 15s · {now_ist}</div>
   </div>
-  <div style="text-align:right;">
-    <div class="mode">📄 PAPER MODE</div>
-    <div class="refresh" style="margin-top:6px;">🕐 <span id="clock"></span></div>
+  <div style="text-align:right;display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
+    <span style="background:{mode_bg};color:{mode_col};padding:4px 14px;border-radius:20px;font-size:12px;font-weight:700;">{mode_label}</span>
+    <span style="color:#6b7280;font-size:11px;">🕐 IST <b id="clk"></b></span>
+    <span style="color:#{'4ade80' if ot else '6b7280'};font-size:11px;">{'🔴 POSITION OPEN' if ot else '⚪ IDLE'}</span>
   </div>
 </div>
 
+<!-- OPEN TRADE PANEL -->
+{open_panel}
+
+<!-- PERFORMANCE STATS -->
+<div class="sec">Performance Summary</div>
 <div class="stats">
-  <div class="stat"><div class="label">Total Trades</div><div class="value white">{total}</div></div>
-  <div class="stat"><div class="label">Win Rate</div><div class="value {'green' if tp_cnt >= sl_cnt else 'red'}">{win_rt}</div></div>
-  <div class="stat"><div class="label">TP Hits</div><div class="value green">{tp_cnt}</div></div>
-  <div class="stat"><div class="label">SL Hits</div><div class="value red">{sl_cnt}</div></div>
-  <div class="stat"><div class="label">Total Pts</div><div class="value {'green' if tot_pts >= 0 else 'red'}">{'+' if tot_pts > 0 else ''}{tot_pts}</div></div>
-  <div class="stat"><div class="label">Avg Pts/Trade</div><div class="value {'green' if avg_pts >= 0 else 'red'}">{'+' if avg_pts > 0 else ''}{avg_pts}</div></div>
-  <div class="stat"><div class="label">Avg Entry Slip</div><div class="value yellow">{avg_sl:+.2f}</div></div>
-  <div class="stat"><div class="label">Avg WH Latency</div><div class="value blue">{avg_wh:.0f}ms</div></div>
+  <div class="stat"><div class="sv" style="color:#f9fafb">{total}</div><div class="sl">Total Trades</div></div>
+  <div class="stat"><div class="sv" style="color:{'#4ade80' if tp_cnt>=sl_cnt else '#f87171'}">{win_rt}</div><div class="sl">Win Rate</div></div>
+  <div class="stat"><div class="sv" style="color:#4ade80">{tp_cnt}</div><div class="sl">TP Hits</div></div>
+  <div class="stat"><div class="sv" style="color:#f87171">{sl_cnt}</div><div class="sl">SL Hits</div></div>
+  <div class="stat"><div class="sv" style="color:{'#4ade80' if tot_pts>=0 else '#f87171'}">{'+' if tot_pts>0 else ''}{tot_pts}</div><div class="sl">Total Pts</div></div>
+  <div class="stat"><div class="sv" style="color:{'#4ade80' if avg_pts>=0 else '#f87171'}">{'+' if avg_pts>0 else ''}{avg_pts}</div><div class="sl">Avg Pts/Trade</div></div>
+  <div class="stat"><div class="sv" style="color:#4ade80">{avg_tp_pts:+.1f}</div><div class="sl">Avg TP Pts</div></div>
+  <div class="stat"><div class="sv" style="color:#f87171">{avg_sl_pts:+.1f}</div><div class="sl">Avg SL Pts</div></div>
+  <div class="stat"><div class="sv" style="color:#facc15">{avg_slip:+.2f}</div><div class="sl">Avg Entry Slip</div></div>
+  <div class="stat"><div class="sv" style="color:#60a5fa">{avg_wh:.0f}ms</div><div class="sl">Avg WH Latency</div></div>
+  <div class="stat"><div class="sv" style="color:#818cf8">{avg_el:.0f}ms</div><div class="sl">Avg Entry Latency</div></div>
+  <div class="stat"><div class="sv" style="color:#4ade80">{buy_wr}</div><div class="sl">BUY Win Rate</div></div>
+  <div class="stat"><div class="sv" style="color:#f87171">{sell_wr}</div><div class="sl">SELL Win Rate</div></div>
 </div>
 
-<div class="table-wrap">
+<!-- ANALYSIS PANELS -->
+<div class="grid2" style="padding:0 24px;gap:16px;margin-bottom:16px;">
+
+  <!-- Pine Parity / Fill Quality -->
+  <div class="panel">
+    <h3>🎯 Pine Parity — Fill Quality vs Signal</h3>
+    <div class="kv"><span class="kl">Avg entry slippage</span><span class="kv2">{avg_slip:+.2f} pts</span></div>
+    <div class="kv"><span class="kl">Worst fills (top 3)</span><span class="kv2">{worst_slip_str}</span></div>
+    <div class="kv"><span class="kl">BUY fill vs Pine</span><span class="kv2">{'—' if not buy_trades else f"{round(sum(float(t.get('entry_slippage_pts',0)) for t in buy_trades)/len(buy_trades),2):+.2f} pts avg"}</span></div>
+    <div class="kv"><span class="kl">SELL fill vs Pine</span><span class="kv2">{'—' if not sell_trades else f"{round(sum(float(t.get('entry_slippage_pts',0)) for t in sell_trades)/len(sell_trades),2):+.2f} pts avg"}</span></div>
+    <div class="kv" style="margin-top:8px"><span class="kl">Grade distribution</span><span></span></div>
+    <table style="margin-top:6px">
+      <thead><tr><th>Grade</th><th style="text-align:right">Count</th><th style="text-align:right">%</th><th style="text-align:right">Win Rate</th><th>Bar</th></tr></thead>
+      <tbody>{grade_rows or '<tr><td colspan="5" style="color:#4b5563;padding:8px">No data yet</td></tr>'}</tbody>
+    </table>
+  </div>
+
+  <!-- Profitability Insights -->
+  <div class="panel">
+    <h3>💡 Profitability Insights</h3>
+    <div class="kv"><span class="kl">Overall win rate</span><span class="kv2">{win_rt} ({total} trades)</span></div>
+    <div class="kv"><span class="kl">INTACT+MILD only</span><span class="kv2">{clean_wr} ({len(clean_trades)} trades)</span></div>
+    <div class="kv"><span class="kl">BUY win rate</span><span class="kv2">{buy_wr} ({len(buy_trades)} trades)</span></div>
+    <div class="kv"><span class="kl">SELL win rate</span><span class="kv2">{sell_wr} ({len(sell_trades)} trades)</span></div>
+    <div class="kv"><span class="kl">Avg pts on TP</span><span class="kv2" style="color:#4ade80">{avg_tp_pts:+.1f} pts</span></div>
+    <div class="kv"><span class="kl">Avg pts on SL</span><span class="kv2" style="color:#f87171">{avg_sl_pts:+.1f} pts</span></div>
+    <div class="kv"><span class="kl">Required WR to break even</span><span class="kv2">{f"{round(abs(avg_sl_pts)/(abs(avg_sl_pts)+avg_tp_pts)*100)}%" if avg_tp_pts>0 and avg_sl_pts<0 else "—"}</span></div>
+    <div style="margin-top:10px">
+      {"<div class='insight'>✅ INTACT entries performing well — keep filtering</div>" if grade_wr.get("INTACT",("","",0))[2]>60 else ""}
+      {"<div class='insight warn'>⚠️ DEGRADED+ entries hurting win rate — consider skipping</div>" if grade_counts.get("DEGRADED",0)+grade_counts.get("BROKEN",0)+grade_counts.get("CRITICAL",0)>2 else ""}
+      {"<div class='insight info'>ℹ️ Not enough data yet — need 20+ trades for meaningful insights</div>" if total<20 else ""}
+      {"<div class='insight'>✅ Sufficient data for analysis</div>" if total>=20 else ""}
+    </div>
+  </div>
+</div>
+
+<!-- LATENCY BREAKDOWN -->
+<div class="panel" style="margin:0 24px 16px;">
+  <h3>⏱ Execution Latency Breakdown</h3>
+  <div class="grid3">
+    <div>
+      <div class="kv"><span class="kl">Avg webhook latency</span><span class="kv2" style="color:#60a5fa">{avg_wh:.0f} ms</span></div>
+      <div class="kv"><span class="kl">Best webhook</span><span class="kv2" style="color:#4ade80">{f"{min(wh_list):.0f} ms" if wh_list else "—"}</span></div>
+      <div class="kv"><span class="kl">Worst webhook</span><span class="kv2" style="color:#f87171">{f"{max(wh_list):.0f} ms" if wh_list else "—"}</span></div>
+    </div>
+    <div>
+      <div class="kv"><span class="kl">Avg entry latency</span><span class="kv2" style="color:#818cf8">{avg_el:.0f} ms</span></div>
+      <div class="kv"><span class="kl">Best entry</span><span class="kv2" style="color:#4ade80">{f"{min(el_list):.0f} ms" if el_list else "—"}</span></div>
+      <div class="kv"><span class="kl">Worst entry</span><span class="kv2" style="color:#f87171">{f"{max(el_list):.0f} ms" if el_list else "—"}</span></div>
+    </div>
+    <div>
+      <div class="kv"><span class="kl">Total avg end-to-end</span><span class="kv2" style="color:#facc15">{round(avg_wh+avg_el):.0f} ms</span></div>
+      <div class="kv"><span class="kl">Pine signal → fill</span><span class="kv2">WH + entry combined</span></div>
+      <div class="kv"><span class="kl">Target</span><span class="kv2" style="color:#4ade80">WH &lt;1500ms · Entry &lt;500ms</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- ORDER LIFECYCLE -->
+<div class="sec">Order Lifecycle — Last 20 Events</div>
+<div class="tw">
 <table>
-  <thead>
-    <tr>
-      <th>#</th>
-      <th>Dir</th>
-      <th>Date / Time</th>
-      <th>TF</th>
-      <th>Fill $</th>
-      <th>Pine $</th>
-      <th>TP $</th>
-      <th>SL $</th>
-      <th>Exit $</th>
-      <th>Pts</th>
-      <th>P&amp;L (BTC)</th>
-      <th>Result</th>
-      <th>Exit Type</th>
-      <th>Entry Slip</th>
-      <th>Exit Slip</th>
-      <th>WH Lat (ms)</th>
-      <th>Entry Lat (ms)</th>
-      <th>Duration</th>
-      <th>Grade</th>
-      <th>Recovery</th>
-    </tr>
-  </thead>
+  <thead><tr>
+    <th>IST Time</th><th>Event</th><th>Trade ID</th><th style="text-align:right">Price</th>
+    <th style="text-align:right">+ms</th><th>Order ID</th><th>Notes</th>
+  </tr></thead>
+  <tbody>{lc_rows or lc_empty}</tbody>
+</table>
+</div>
+
+<!-- TRADE JOURNAL -->
+<div class="sec">Trade Journal — All Trades (newest first)</div>
+<div class="tw">
+<table>
+  <thead><tr>
+    <th>#</th><th>Dir</th><th>Time (IST)</th><th>TF</th>
+    <th style="text-align:right">Fill $</th>
+    <th style="text-align:right">Pine $</th>
+    <th style="text-align:right">TP $</th>
+    <th style="text-align:right">SL $</th>
+    <th style="text-align:right">Exit $</th>
+    <th style="text-align:right">Δ Exit</th>
+    <th style="text-align:right">Pts</th>
+    <th style="text-align:right">P&L</th>
+    <th>Result</th>
+    <th>Exit Type</th>
+    <th style="text-align:right">Slip pts</th>
+    <th style="text-align:right">Slip %</th>
+    <th style="text-align:right">WH lat</th>
+    <th style="text-align:right">En lat</th>
+    <th style="text-align:right">Duration</th>
+    <th>Grade</th>
+    <th>Entry OID</th>
+    <th>Exit OID</th>
+    <th>Rec</th>
+  </tr></thead>
   <tbody>
-    {rows_html}
+    {journal_rows}
     {empty_msg}
   </tbody>
 </table>
 </div>
 
 <div class="footer">
-  Vol Surge v4.0 · Lifecycle: IDLE → ENTERED → CLOSED · Monitor: 2s poll · TP = 2R fixed · SL = fixed stop
+  Vol Surge v4.0 · IDLE → ENTERED → CLOSED · TP=2R fixed · SL=fixed · Monitor=2s poll · LOT={LOT_SIZE} BTC · {'LIVE' if not PAPER_MODE else 'PAPER'}
 </div>
-
 </body>
 </html>"""
 
