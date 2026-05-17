@@ -487,17 +487,26 @@ def place_market_order(side: str, size: float, reduce_only: bool = False, ref_pr
         return None
     result = resp.get("result", {})
     status = result.get("state", resp.get("status", ""))
-    if status in ("accepted", "filled", "open"):
+    unfilled = float(result.get("unfilled_size", -1))
+
+    # Delta returns state="closed" for fully-filled IOC market orders.
+    # Must include "closed" with unfilled_size=0 as a valid fill state.
+    # unfilled_size=0 + paid_commission>0 = order fully executed.
+    is_filled = (
+        status in ("accepted", "filled", "open")
+        or (status == "closed" and unfilled == 0)
+    )
+    if is_filled:
         avg = result.get("average_fill_price") or result.get("limit_price")
+        log.info(f"[ORDER] Market order filled | state={status} unfilled={unfilled} fill_px={avg}")
         return {
-            "order_id":       result.get("id"),
-            "fill_price":     float(avg) if avg else None,
+            "order_id":         result.get("id"),
+            "fill_price":       float(avg) if avg else None,
             "api_request_time": api_req_t,
-            "api_ack_time":   api_ack_t,
+            "api_ack_time":     api_ack_t,
         }
     err_code = resp.get("error", resp.get("message", str(resp)[:300]))
-    _loge(f"market order rejected | code={err_code} | full={resp}")
-    # Store on module level so caller can include it in Telegram
+    _loge(f"market order rejected | state={status} unfilled={unfilled} | code={err_code} | full={resp}")
     place_market_order._last_error = str(err_code)
     return None
 
