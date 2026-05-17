@@ -4,7 +4,7 @@ volsurge_v4.py — Vol Surge Bot v4.0 (Simplified Lifecycle Build)
 ================================================================
 Philosophy  : TradingView = Signal Intent | Python = Execution Authority | Delta = Reality
 Lifecycle   : IDLE → ENTERED → CLOSED
-TP model    : Single full-position exit at 2R (sl_dist × 2.0). No partials.
+TP model    : Single full-position exit at 1.5R (sl_dist × 1.5). No partials.
 SL model    : Fixed stop-market at entry ± sl_dist. Never moved.
 
 Modes:
@@ -83,7 +83,7 @@ def _btc_to_contracts(btc_size: float, ref_price: Optional[float] = None) -> int
     log.info(f"[SIZE] {btc_size} BTC ÷ {DELTA_CONTRACT_SIZE_BTC} BTC/contract = {contracts} contracts")
     return contracts
 
-TP_R = 2.0   # TP = entry ± sl_dist × 2.0  (2R)
+TP_R = 1.5   # TP = entry ± sl_dist × 1.5  (1.5R) — matches Pine TP2 R-multiple
 
 # Entry guards — reject trade if either threshold is breached.
 # MAX_SLIPPAGE_RATIO : reject if |fill - pine_entry| / sl_dist > this value.
