@@ -112,11 +112,16 @@ STATE_CLOSED  = "CLOSED"
 # ════════════════════════════════════════════════════════════════════════
 DATA_DIR   = Path(os.getenv("DATA_DIR", "data")); DATA_DIR.mkdir(exist_ok=True)
 LOG_DIR    = Path(os.getenv("LOG_DIR",  "logs")); LOG_DIR.mkdir(exist_ok=True)
-STATE_FILE = DATA_DIR / "state.json"
-CSV_FILE       = DATA_DIR / "trades.csv"
+STATE_FILE     = DATA_DIR / "state.json"
+CSV_FILE       = DATA_DIR / "trades.csv"            # closed trade journal (written at exit)
 RECON_FILE     = DATA_DIR / "reconciliation.csv"
-LIFECYCLE_FILE = DATA_DIR / "order_lifecycle.csv"
+LIFECYCLE_FILE = DATA_DIR / "order_lifecycle.csv"   # per-event order timeline
+LATENCY_FILE   = DATA_DIR / "execution_latency.csv" # written at ENTRY (survives crashes)
+SLIPPAGE_FILE  = DATA_DIR / "slippage_audit.csv"    # written at EXIT (entry+exit slippage)
 LOG_FILE       = LOG_DIR  / "volsurge_v4.log"
+
+# Detect whether data is on a persistent volume (Railway: mount at /app/data)
+_DATA_PERSISTENT = str(DATA_DIR).startswith("/app/data") or os.getenv("DATA_PERSISTENT") == "true"
 
 # ════════════════════════════════════════════════════════════════════════
 # LOGGING
@@ -243,8 +248,34 @@ LIFECYCLE_HEADERS = [
     "notes",
 ]
 
+# Written at ENTRY time — survives bot crash/redeploy between entry and exit.
+# Gives a persistent record of every real Delta order placed, even if _close_trade() never runs.
+LATENCY_HEADERS = [
+    "trade_id", "timestamp_ist", "direction", "mode",
+    "pine_signal_time", "webhook_recv_time", "entry_submit_time", "entry_ack_time",
+    "pine_entry_px", "delta_fill_px", "entry_slippage_pts",
+    "webhook_latency_ms", "api_roundtrip_ms",
+    "sl_price", "tp_price", "sl_order_id", "tp_order_id",
+    "contracts", "entry_order_id",
+]
+
+# Written at EXIT time alongside trades.csv — focused on slippage comparison.
+SLIPPAGE_HEADERS = [
+    "trade_id", "timestamp_ist", "direction", "mode",
+    "pine_entry_px", "delta_entry_fill", "entry_slippage_pts", "entry_slippage_pct",
+    "pine_exit_px",  "delta_exit_fill",  "exit_slippage_pts",  "exit_slippage_pct",
+    "pine_pts", "live_pts", "slippage_drag_pts",
+    "exit_type", "webhook_latency_ms", "timeframe",
+]
+
 def _init_csvs():
-    for fpath, headers in [(CSV_FILE, CSV_HEADERS), (RECON_FILE, RECON_HEADERS), (LIFECYCLE_FILE, LIFECYCLE_HEADERS)]:
+    for fpath, headers in [
+        (CSV_FILE,       CSV_HEADERS),
+        (RECON_FILE,     RECON_HEADERS),
+        (LIFECYCLE_FILE, LIFECYCLE_HEADERS),
+        (LATENCY_FILE,   LATENCY_HEADERS),
+        (SLIPPAGE_FILE,  SLIPPAGE_HEADERS),
+    ]:
         if fpath.exists():
             try:
                 with open(fpath, "r", newline="") as f:
@@ -842,6 +873,36 @@ def _close_trade(exit_price: float, exit_type: str, exit_slippage: float = 0.0):
     _append_csv(CSV_FILE, CSV_HEADERS, row)
     _write_reconciliation(trade, python_outcome, pts, exit_slippage, trade_duration_sec)
 
+    # ── slippage_audit.csv — entry + exit slippage in one row ────────────
+    _pine_exit = trade.get("pine_tp", "") if "TP" in exit_type else trade.get("pine_sl", "")
+    try:   _exit_slip_pct = round(exit_slippage / float(exit_price) * 100, 4) if exit_price else ""
+    except: _exit_slip_pct = ""
+    try:   _entry_slip_pct = trade.get("entry_slippage_pct", "")
+    except: _entry_slip_pct = ""
+    try:   _pine_pts = float(trade.get("pine_entry_px", 0)) - float(_pine_exit) if d == "SELL" else float(_pine_exit) - float(trade.get("pine_entry_px", 0))
+    except: _pine_pts = ""
+    _slip_row = {
+        "trade_id":             trade.get("trade_id", ""),
+        "timestamp_ist":        (datetime.utcnow() + timedelta(seconds=19800)).strftime("%d/%m/%Y %H:%M:%S"),
+        "direction":            d,
+        "mode":                 trade.get("mode", ""),
+        "pine_entry_px":        trade.get("pine_entry_px", ""),
+        "delta_entry_fill":     trade.get("fill_price", ""),
+        "entry_slippage_pts":   trade.get("entry_slippage_pts", ""),
+        "entry_slippage_pct":   _entry_slip_pct,
+        "pine_exit_px":         _pine_exit,
+        "delta_exit_fill":      exit_price,
+        "exit_slippage_pts":    exit_slippage,
+        "exit_slippage_pct":    _exit_slip_pct,
+        "pine_pts":             _pine_pts,
+        "live_pts":             pts,
+        "slippage_drag_pts":    round(float(_pine_pts) - pts, 2) if _pine_pts != "" else "",
+        "exit_type":            exit_type,
+        "webhook_latency_ms":   trade.get("webhook_latency_ms", ""),
+        "timeframe":            trade.get("signal_timeframe", ""),
+    }
+    _append_csv(SLIPPAGE_FILE, SLIPPAGE_HEADERS, _slip_row)
+
     emoji = "✅" if pts > 0 else "🔴" if pts < 0 else "⚪"
     _log(f"STATE→CLOSED | {d} exit={exit_price} pts={pts:+.2f} outcome={python_outcome} via {exit_type}")
 
@@ -1044,6 +1105,37 @@ def _process_entry(
             if not sl_oid:
                 _loge("SL ORDER FAILED after entry — CRITICAL: close position manually")
                 tg(f"🚨 SL ORDER FAILED after {d} entry @ {fill_px} — CLOSE POSITION MANUALLY ON DELTA")
+
+            # ── Write execution_latency.csv at ENTRY time (crash-safe record) ──
+            # This row is written immediately after SL/TP placed — persists even if
+            # bot crashes or redeploys before _close_trade() is called.
+            if not PAPER_MODE:
+                _entry_slip = round(fill_px - pine_entry_px if d == "BUY" else pine_entry_px - fill_px, 1)
+                _wh_lat = round((wh_recv_time - pine_signal_time_f) * 1000, 1) if pine_signal_time_f else ""
+                _api_rt  = round((result.get("api_ack_time", 0) - result.get("api_request_time", 0)) * 1000, 1) if result else ""
+                _lat_row = {
+                    "trade_id":            trade_id,
+                    "timestamp_ist":       (datetime.utcnow() + timedelta(seconds=19800)).strftime("%d/%m/%Y %H:%M:%S"),
+                    "direction":           d,
+                    "mode":                "LIVE",
+                    "pine_signal_time":    pine_signal_time_f or "",
+                    "webhook_recv_time":   wh_recv_time,
+                    "entry_submit_time":   result.get("api_request_time", "") if result else "",
+                    "entry_ack_time":      result.get("api_ack_time", "") if result else "",
+                    "pine_entry_px":       pine_entry_px,
+                    "delta_fill_px":       fill_px,
+                    "entry_slippage_pts":  _entry_slip,
+                    "webhook_latency_ms":  _wh_lat,
+                    "api_roundtrip_ms":    _api_rt,
+                    "sl_price":            sl_price,
+                    "tp_price":            tp_price,
+                    "sl_order_id":         sl_oid or "",
+                    "tp_order_id":         tp_oid or "",
+                    "contracts":           entry_contracts,
+                    "entry_order_id":      entry_order_id or "",
+                }
+                _append_csv(LATENCY_FILE, LATENCY_HEADERS, _lat_row)
+                log.info(f"[LATENCY_CSV] Entry row written for {trade_id} slip={_entry_slip:+.1f}pts wh={_wh_lat}ms")
 
         # ── Slippage guard (PAPER + LIVE) ────────────────────────────────
         # Reject if fill is too far from Pine's signal price.
@@ -1749,6 +1841,27 @@ async def dashboard():
 
     empty_msg = "" if trades else '<tr><td colspan="23" style="text-align:center;color:#6b7280;padding:40px;">No trades yet — waiting for first signal</td></tr>'
 
+    # Persistence warning — shown prominently if no Railway volume is mounted
+    _persist_warn = "" if _DATA_PERSISTENT else """
+    <div style="background:#2a1a00;border:1px solid #f59e0b;border-radius:8px;padding:12px 20px;
+                margin:0 24px 16px;display:flex;align-items:center;gap:12px;">
+      <span style="font-size:18px">⚠️</span>
+      <div>
+        <div style="color:#f59e0b;font-weight:700;font-size:13px">DATA NOT PERSISTING — Railway Volume Not Mounted</div>
+        <div style="color:#d97706;font-size:11px;margin-top:3px">
+          trades.csv and state.json are wiped on every redeploy. Live trades will NOT appear here after bot restarts.<br>
+          Fix: Railway → Storage → Add Volume → Mount Path: <code>/app/data</code> → Set env var <code>DATA_DIR=/app/data</code>
+        </div>
+      </div>
+    </div>"""
+
+    _latency_count = 0
+    try:
+        with open(LATENCY_FILE, "r") as _lf:
+            _latency_count = sum(1 for _ in _lf) - 1  # subtract header
+    except Exception:
+        pass
+
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1801,7 +1914,17 @@ async def dashboard():
     <span style="background:{mode_bg};color:{mode_col};padding:4px 14px;border-radius:20px;font-size:12px;font-weight:700;">{mode_label}</span>
     <span style="color:#6b7280;font-size:11px;">🕐 IST <b id="clk"></b></span>
     <span style="color:#{'4ade80' if ot else '6b7280'};font-size:11px;">{'🔴 POSITION OPEN' if ot else '⚪ IDLE'}</span>
+    <span style="color:#{'4ade80' if _DATA_PERSISTENT else 'f59e0b'};font-size:10px;">{'💾 Data Persistent' if _DATA_PERSISTENT else '⚠️ Data Ephemeral'}</span>
   </div>
+</div>
+
+{_persist_warn}
+
+<!-- ENTRY LATENCY COUNTER -->
+<div style="padding:4px 24px 0;font-size:11px;color:#6b7280;">
+  📊 Entries recorded in execution_latency.csv: <b style="color:#e2e8f0">{_latency_count}</b>
+  &nbsp;|&nbsp; Closed trades in trades.csv: <b style="color:#e2e8f0">{len(trades)}</b>
+  &nbsp;|&nbsp; Data path: <code style="color:#60a5fa">{DATA_DIR}</code>
 </div>
 
 <!-- OPEN TRADE PANEL -->
