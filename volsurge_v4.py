@@ -1118,33 +1118,37 @@ def _process_entry(
             # ── Write execution_latency.csv at ENTRY time (crash-safe record) ──
             # This row is written immediately after SL/TP placed — persists even if
             # bot crashes or redeploys before _close_trade() is called.
+            # Wrapped in try/except so a CSV write failure can NEVER kill the entry flow.
             if not PAPER_MODE:
-                _entry_slip = round(fill_px - pine_entry_px if d == "BUY" else pine_entry_px - fill_px, 1)
-                _wh_lat = round((wh_recv_time - pine_signal_time_f) * 1000, 1) if pine_signal_time_f else ""
-                _api_rt  = round((result.get("api_ack_time", 0) - result.get("api_request_time", 0)) * 1000, 1) if result else ""
-                _lat_row = {
-                    "trade_id":            trade_id,
-                    "timestamp_ist":       (datetime.utcnow() + timedelta(seconds=19800)).strftime("%d/%m/%Y %H:%M:%S"),
-                    "direction":           d,
-                    "mode":                "LIVE",
-                    "pine_signal_time":    pine_signal_time_f or "",
-                    "webhook_recv_time":   wh_recv_time,
-                    "entry_submit_time":   result.get("api_request_time", "") if result else "",
-                    "entry_ack_time":      result.get("api_ack_time", "") if result else "",
-                    "pine_entry_px":       pine_entry_px,
-                    "delta_fill_px":       fill_px,
-                    "entry_slippage_pts":  _entry_slip,
-                    "webhook_latency_ms":  _wh_lat,
-                    "api_roundtrip_ms":    _api_rt,
-                    "sl_price":            sl_price,
-                    "tp_price":            tp_price,
-                    "sl_order_id":         sl_oid or "",
-                    "tp_order_id":         tp_oid or "",
-                    "contracts":           entry_contracts,
-                    "entry_order_id":      entry_order_id or "",
-                }
-                _append_csv(LATENCY_FILE, LATENCY_HEADERS, _lat_row)
-                log.info(f"[LATENCY_CSV] Entry row written for {trade_id} slip={_entry_slip:+.1f}pts wh={_wh_lat}ms")
+                try:
+                    _entry_slip = round(fill_px - pine_entry_px if d == "BUY" else pine_entry_px - fill_px, 1)
+                    _wh_lat = round((recv_time - pine_time / 1000) * 1000, 1) if pine_time else ""
+                    _api_rt  = round((result.get("api_ack_time", 0) - result.get("api_request_time", 0)) * 1000, 1) if result else ""
+                    _lat_row = {
+                        "trade_id":            trade_id,
+                        "timestamp_ist":       (datetime.utcnow() + timedelta(seconds=19800)).strftime("%d/%m/%Y %H:%M:%S"),
+                        "direction":           d,
+                        "mode":                "LIVE",
+                        "pine_signal_time":    pine_time or "",
+                        "webhook_recv_time":   recv_time,
+                        "entry_submit_time":   result.get("api_request_time", "") if result else "",
+                        "entry_ack_time":      result.get("api_ack_time", "") if result else "",
+                        "pine_entry_px":       pine_entry_px,
+                        "delta_fill_px":       fill_px,
+                        "entry_slippage_pts":  _entry_slip,
+                        "webhook_latency_ms":  _wh_lat,
+                        "api_roundtrip_ms":    _api_rt,
+                        "sl_price":            sl_price,
+                        "tp_price":            tp_price,
+                        "sl_order_id":         sl_oid or "",
+                        "tp_order_id":         tp_oid or "",
+                        "contracts":           entry_contracts,
+                        "entry_order_id":      entry_order_id or "",
+                    }
+                    _append_csv(LATENCY_FILE, LATENCY_HEADERS, _lat_row)
+                    log.info(f"[LATENCY_CSV] Entry row written for {trade_id} slip={_entry_slip:+.1f}pts wh={_wh_lat}ms")
+                except Exception as _csv_err:
+                    _loge(f"[LATENCY_CSV] Write failed (non-fatal) — entry flow continues: {_csv_err}")
 
         # ── Slippage guard (PAPER + LIVE) ────────────────────────────────
         # Reject if fill is too far from Pine's signal price.
