@@ -1098,10 +1098,10 @@ def _process_entry(
             fill_px = round(fill_px, 1)
 
             # Place full-size SL stop + TP limit orders
-            # Use Pine's exact levels (close-based) so bot exits match Pine chart exactly.
+            # Fill-based: SL/TP calculated from actual fill price to preserve 2:1 R:R.
             close_side = "sell" if d == "BUY" else "buy"
-            sl_price   = round(pine_sl, 1)
-            tp_price   = round(pine_tp, 1)
+            sl_price   = round(fill_px - sl_dist, 1) if d == "BUY" else round(fill_px + sl_dist, 1)
+            tp_price   = round(fill_px + sl_dist * TP_R, 1) if d == "BUY" else round(fill_px - sl_dist * TP_R, 1)
 
             sl_result = place_sl_order(close_side, LOT_SIZE, sl_price, contracts=entry_contracts)
             tp_result = place_tp_order(close_side, LOT_SIZE, tp_price, contracts=entry_contracts)
