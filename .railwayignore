@@ -1,0 +1,12 @@
+docs/
+*.pine
+*.txt
+*.md
+logs/
+logs-v5/
+data/
+data-v5/
+tests/
+__pycache__/
+*.pyc
+cloudflared.exe
