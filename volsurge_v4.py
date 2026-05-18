@@ -725,11 +725,9 @@ def _set_open_trade(
     global open_trade
     d = direction
 
-    # Use Pine's exact SL/TP levels (close-based) so bot and Pine chart stay in sync.
-    # Pine sends sl/tp2 in the webhook computed from close price — using those directly
-    # means both Pine and bot trigger at the same price, regardless of fill slippage.
-    sl_price = round(pine_sl, 1)
-    tp_price = round(pine_tp, 1)
+    # Fill-based SL/TP — anchored to actual Delta fill price to preserve exact R:R.
+    sl_price = round(fill_price - sl_dist, 1)         if d == "BUY" else round(fill_price + sl_dist, 1)
+    tp_price = round(fill_price + sl_dist * TP_R, 1)  if d == "BUY" else round(fill_price - sl_dist * TP_R, 1)
 
     entry_slippage   = round(fill_price - pine_entry_px, 2) if d == "BUY" else round(pine_entry_px - fill_price, 2)
     wh_latency_ms    = round((webhook_recv_time - pine_signal_time / 1000) * 1000, 1)
@@ -796,7 +794,7 @@ def _set_open_trade(
     _log(
         f"STATE→ENTERED | {d} fill={fill_price} slip={entry_slippage:+.2f}pts "
         f"wh_lat={wh_latency_ms:.0f}ms entry_lat={entry_latency_ms:.0f}ms "
-        f"sl={sl_price} tp={tp_price} (2R) mode={'PAPER' if PAPER_MODE else 'LIVE'}"
+        f"sl={sl_price} tp={tp_price} ({TP_R}R) mode={'PAPER' if PAPER_MODE else 'LIVE'}"
     )
 
     if _ratio >= 1.5:
@@ -813,7 +811,7 @@ def _set_open_trade(
     tg(
         f"{'📄 PAPER' if PAPER_MODE else '🟢 LIVE'} <b>{d} ENTERED</b>\n"
         f"Fill: <b>{fill_price:,.1f}</b> | Slip: {entry_slippage:+.2f}pts\n"
-        f"SL: {sl_price:,.1f} | TP: {tp_price:,.1f} (2R)\n"
+        f"SL: {sl_price:,.1f} | TP: {tp_price:,.1f} ({TP_R}R)\n"
         f"WH latency: {wh_latency_ms:.0f}ms | Entry latency: {entry_latency_ms:.0f}ms\n"
         f"Structure: <b>{_grade}</b> (ratio={_ratio:.3f})"
     )
