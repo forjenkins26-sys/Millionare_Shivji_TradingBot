@@ -8,12 +8,13 @@ indicator("Vol Surge v5 — Delta Algo BOt [Standalone]", overlay=true, max_line
 grpCore = "Vol Surge — Core"
 vsLookback  = input.int(5,     "Chop lookback (bars)",               minval=2,  maxval=20,  group=grpCore)
 vsBurstMult = input.float(2.0, "Burst multiplier (body ÷ chop avg)", minval=1.0,maxval=6.0, step=0.25, group=grpCore)
-vsSLMult    = input.float(1.25,"SL  (× pre-burst ATR5)",             minval=0.3,maxval=2.0, step=0.05, group=grpCore)
+vsSLMult    = input.float(1.8,"SL  (× pre-burst ATR5)",             minval=0.3,maxval=2.0, step=0.05, group=grpCore)
 vsTP1R      = input.float(1.0, "TP1 R-multiple",                     minval=0.5,maxval=4.0, step=0.25, group=grpCore)
-vsTP2R      = input.float(2.0, "TP2 R-multiple",                     minval=1.0,maxval=6.0, step=0.25, group=grpCore)
+vsTP2R      = input.float(1.4, "TP2 R-multiple",                     minval=1.0,maxval=6.0, step=0.25, group=grpCore)
 trailAtr    = input.float(0.3, "Trail SL ATR Multiplier (unused — trail off for 5m)", minval=0.1,maxval=3.0, step=0.1,  group=grpCore)
 // ── Simple Mode: skip TP1 partial — hold full position to SL or TP2 only ──
-useSimpleMode = input.bool(true, "⚡ Simple Mode (SL + TP2 only — no TP1 partial)", group=grpCore)
+useSimpleMode   = input.bool(true,  "⚡ Simple Mode (SL + TP2 only — no TP1 partial)", group=grpCore)
+usePrevCandleSL = input.bool(false, "📍 SL = Previous Candle Low/High (BUY→low[1], SELL→high[1])", group=grpCore)
 vsCooldown  = input.int(3,     "Cooldown bars after signal",         minval=0,  maxval=20,  group=grpCore)
 
 grpFilt = "Filters"
@@ -21,6 +22,19 @@ useEmaFilt  = input.bool(false, "EMA Direction Filter (3m 200)",  group=grpFilt)
 emaLen      = input.int(200,    "EMA Length", minval=20, maxval=500, group=grpFilt)
 use1hGate   = input.bool(false, "1H EMA Trend Gate",               group=grpFilt)
 h1GateBuf   = input.float(0.003,"1H Gate Buffer %", minval=0.0, maxval=0.02, step=0.0005, group=grpFilt)
+// ── 4H Trend Alignment ──
+use4hTrend  = input.bool(false, "📈 4H Trend Alignment (only trade WITH 4H trend)", group=grpFilt)
+htf4hEmaLen = input.int(50,     "4H EMA Length",                  minval=10, maxval=200, group=grpFilt)
+// ── ADX Trend Strength ──
+useAdxFilter = input.bool(false, "📊 ADX Filter (skip choppy/ranging market)", group=grpFilt)
+adxLen       = input.int(14,    "ADX Length",                     minval=5,  maxval=30,  group=grpFilt)
+adxThresh    = input.float(20.0,"Min ADX threshold (>20 = trending)", minval=10, maxval=40, step=1, group=grpFilt)
+// ── Breakout Context Filter ──
+useBreakoutCtx  = input.bool(false, "🚀 Breakout Context (burst must break recent N-bar range)", group=grpFilt)
+breakoutCtxBars = input.int(8,     "Range lookback bars",                    minval=3, maxval=30, group=grpFilt)
+// ── SL Cooldown After Loss ──
+useSlCooldown   = input.bool(false, "⏸️ SL Cooldown (pause N bars after SL hit)", group=grpFilt)
+slCooldownBars  = input.int(5,     "Cooldown bars after SL hit",             minval=1, maxval=20, group=grpFilt)
 
 grpSess = "Session Filter (IST = UTC+5:30)"
 useSession  = input.bool(false,  "Enable Session Filter", group=grpSess)
@@ -79,6 +93,24 @@ h1_neutral  = not bias1hBull and not bias1hBear
 gateOK_long  = not use1hGate or bias1hBull or h1_neutral
 gateOK_short = not use1hGate or bias1hBear or h1_neutral
 
+// ── 4H Trend Alignment ──
+ema_4h          = request.security(syminfo.tickerid, "240", ta.ema(close, htf4hEmaLen), lookahead=barmerge.lookahead_off)
+c_4h            = request.security(syminfo.tickerid, "240", close,                      lookahead=barmerge.lookahead_off)
+trend4hBull     = c_4h > ema_4h
+trend4hBear     = c_4h < ema_4h
+trend4hOK_long  = not use4hTrend or trend4hBull
+trend4hOK_short = not use4hTrend or trend4hBear
+
+// ── ADX Trend Strength ──
+[_diPlus, _diMinus, adxVal] = ta.dmi(adxLen, adxLen)
+adxOK = not useAdxFilter or adxVal >= adxThresh
+
+// ── Breakout Context ──
+recentHigh          = ta.highest(high[1], breakoutCtxBars)
+recentLow           = ta.lowest(low[1],  breakoutCtxBars)
+breakoutCtxOK_long  = not useBreakoutCtx or close > recentHigh
+breakoutCtxOK_short = not useBreakoutCtx or close < recentLow
+
 istHour  = hour(time, "UTC+5:30")
 inLondon = istHour >= londonOpen  and istHour < londonClose
 inNY     = istHour >= nyOpen      and istHour < nyClose
@@ -86,10 +118,15 @@ inAsian  = useAsian and (istHour >= asianOpen and istHour < asianClose)
 sessionOK = not useSession or inLondon or inNY or inAsian
 sessLabel() => inLondon ? "LON" : inNY ? "NY" : inAsian ? "ASN" : "OFF"
 
-var int cooldownLeft = 0
+var int cooldownLeft    = 0
+var int slCooldownLeft  = 0     // bars remaining in post-SL cooldown
 if cooldownLeft > 0
     cooldownLeft -= 1
 cooldownOK = cooldownLeft == 0
+
+if slCooldownLeft > 0
+    slCooldownLeft -= 1
+slCooldownAfterLossOK = not useSlCooldown or slCooldownLeft == 0
 
 // ═══════════════════════════════════════════════════════════
 // TRADE STATE
@@ -129,6 +166,7 @@ var string[] jStat    = array.new_string(0)
 var string[] jSess    = array.new_string(0)
 var float[]  jLots    = array.new_float(0)
 var float[]  jCmpdPnl = array.new_float(0)
+var float[]  jSL      = array.new_float(0)
 
 // ── Compound lot state ──
 var float compoundLots    = fixedLot
@@ -137,7 +175,7 @@ var float baseLot         = fixedLot
 var float calcLots        = fixedLot
 var float at_cmpd_acc     = 0.0
 
-pushJournal(_dir, _inT, _outT, _entPx, _exitPx, _pts, _stat, _sess, _lots, _cmpdPnl) =>
+pushJournal(_dir, _inT, _outT, _entPx, _exitPx, _pts, _stat, _sess, _lots, _cmpdPnl, _slPx) =>
     _pnl = math.round(_pts * fixedLot, 2)
     array.unshift(jDir,     _dir)
     array.unshift(jInT,     _inT)
@@ -150,6 +188,7 @@ pushJournal(_dir, _inT, _outT, _entPx, _exitPx, _pts, _stat, _sess, _lots, _cmpd
     array.unshift(jSess,    _sess)
     array.unshift(jLots,    _lots)
     array.unshift(jCmpdPnl, _cmpdPnl)
+    array.unshift(jSL,      _slPx)
     if array.size(jDir) > maxJRows
         array.pop(jDir)
         array.pop(jInT)
@@ -162,6 +201,7 @@ pushJournal(_dir, _inT, _outT, _entPx, _exitPx, _pts, _stat, _sess, _lots, _cmpd
         array.pop(jSess)
         array.pop(jLots)
         array.pop(jCmpdPnl)
+        array.pop(jSL)
     _pnl
 
 deleteLines() =>
@@ -182,8 +222,8 @@ if _needEntryT and tDir != 0
 // ═══════════════════════════════════════════════════════════
 // SIGNALS
 // ═══════════════════════════════════════════════════════════
-volSurgeLong  = isBurstBull and emaOK_long  and gateOK_long  and sessionOK and cooldownOK and tDir == 0 and barstate.isconfirmed
-volSurgeShort = isBurstBear and emaOK_short and gateOK_short and sessionOK and cooldownOK and tDir == 0 and barstate.isconfirmed
+volSurgeLong  = isBurstBull and emaOK_long  and gateOK_long  and trend4hOK_long  and adxOK and breakoutCtxOK_long  and slCooldownAfterLossOK and sessionOK and cooldownOK and tDir == 0 and barstate.isconfirmed
+volSurgeShort = isBurstBear and emaOK_short and gateOK_short and trend4hOK_short and adxOK and breakoutCtxOK_short and slCooldownAfterLossOK and sessionOK and cooldownOK and tDir == 0 and barstate.isconfirmed
 
 if volSurgeLong or volSurgeShort
     cooldownLeft := vsCooldown
@@ -196,10 +236,10 @@ if volSurgeLong
     deleteLines()
     tDir        := 1
     tEntry      := close
-    tSLDist     := vsSLDist
-    tSL         := close - vsSLDist
-    tTP1        := close + vsSLDist * vsTP1R
-    tTP2        := close + vsSLDist * vsTP2R
+    tSLDist     := usePrevCandleSL ? (close - low[1])  : vsSLDist
+    tSL         := usePrevCandleSL ? low[1]             : (close - vsSLDist)
+    tTP1        := close + tSLDist * vsTP1R
+    tTP2        := close + tSLDist * vsTP2R
     tTP1Hit     := false
     tEntryT     := time        // burst bar fallback (overwritten on next bar by _needEntryT)
     tEntryBar   := bar_index   // lock out same-bar exits
@@ -227,10 +267,10 @@ if volSurgeShort
     deleteLines()
     tDir        := -1
     tEntry      := close
-    tSLDist     := vsSLDist
-    tSL         := close + vsSLDist
-    tTP1        := close - vsSLDist * vsTP1R
-    tTP2        := close - vsSLDist * vsTP2R
+    tSLDist     := usePrevCandleSL ? (high[1] - close) : vsSLDist
+    tSL         := usePrevCandleSL ? high[1]            : (close + vsSLDist)
+    tTP1        := close - tSLDist * vsTP1R
+    tTP2        := close - tSLDist * vsTP2R
     tTP1Hit     := false
     tEntryT     := time        // burst bar fallback (overwritten on next bar by _needEntryT)
     tEntryBar   := bar_index   // lock out same-bar exits
@@ -289,7 +329,7 @@ if tDir == 1
         at_cmpd_acc     += _cmpd_pnl
         consecutiveWins += 1
         compoundLots    := math.min(baseLot * (consecutiveWins + 1), baseLot * maxCompMult)
-        _rpnl     = pushJournal(1, tEntryT, time, tEntry, tTP2, _pts, _statStr, tSess, calcLots, _cmpd_pnl)
+        _rpnl     = pushJournal(1, tEntryT, time, tEntry, tTP2, _pts, _statStr, tSess, calcLots, _cmpd_pnl, tSL)
         statTrades += 1
         statWins   += 1
         statPts    += _pts
@@ -310,12 +350,14 @@ if tDir == 1
         at_cmpd_acc     += _cmpd_pnl
         consecutiveWins := 0
         compoundLots    := baseLot
-        _rpnl     = pushJournal(1, tEntryT, time, tEntry, tSL, _pts, _statStr, tSess, calcLots, _cmpd_pnl)
+        _rpnl     = pushJournal(1, tEntryT, time, tEntry, tSL, _pts, _statStr, tSess, calcLots, _cmpd_pnl, tSL)
         statTrades += 1
         statPts    += _pts
         statPnl    += _rpnl
         balance    += _rpnl
         label.new(bar_index, tSL, _statStr + "  " + (_pts >= 0 ? "+" : "") + str.tostring(_pts) + "pts", color=color.new(#f23645,10), textcolor=color.white, style=label.style_label_left, size=size.small)
+        if useSlCooldown
+            slCooldownLeft := slCooldownBars
         deleteLines()
         tDir := 0
 
@@ -358,7 +400,7 @@ if tDir == -1
         at_cmpd_acc     += _cmpd_pnl
         consecutiveWins += 1
         compoundLots    := math.min(baseLot * (consecutiveWins + 1), baseLot * maxCompMult)
-        _rpnl     = pushJournal(-1, tEntryT, time, tEntry, tTP2, _pts, _statStr, tSess, calcLots, _cmpd_pnl)
+        _rpnl     = pushJournal(-1, tEntryT, time, tEntry, tTP2, _pts, _statStr, tSess, calcLots, _cmpd_pnl, tSL)
         statTrades += 1
         statWins   += 1
         statPts    += _pts
@@ -379,12 +421,14 @@ if tDir == -1
         at_cmpd_acc     += _cmpd_pnl
         consecutiveWins := 0
         compoundLots    := baseLot
-        _rpnl     = pushJournal(-1, tEntryT, time, tEntry, tSL, _pts, _statStr, tSess, calcLots, _cmpd_pnl)
+        _rpnl     = pushJournal(-1, tEntryT, time, tEntry, tSL, _pts, _statStr, tSess, calcLots, _cmpd_pnl, tSL)
         statTrades += 1
         statPts    += _pts
         statPnl    += _rpnl
         balance    += _rpnl
         label.new(bar_index, tSL, _statStr + "  " + (_pts >= 0 ? "+" : "") + str.tostring(_pts) + "pts", color=color.new(#f23645,10), textcolor=color.white, style=label.style_label_left, size=size.small)
+        if useSlCooldown
+            slCooldownLeft := slCooldownBars
         deleteLines()
         tDir := 0
 
@@ -433,7 +477,7 @@ if barstate.islast and showTable
 // JOURNAL TABLE  (bottom-right)
 // Columns: Dir | Date | In | Out | Entry$ | Exit$ | Pts | Lots | Cmpd P&L | Fix P&L | Status/Sess
 // ═══════════════════════════════════════════════════════════
-var table jTbl = table.new(position.bottom_right, 11, 16,
+var table jTbl = table.new(position.bottom_right, 12, 16,
   bgcolor=color.new(#0d0d0d,5), border_color=color.new(#333333,0), border_width=1,
   frame_color=color.new(#555555,0), frame_width=1)
 
@@ -452,11 +496,12 @@ if barstate.islast and showJournal
     table.cell(jTbl, 3,  0, "Out",           text_color=_hfg, text_size=size.small, bgcolor=_hbg)
     table.cell(jTbl, 4,  0, "Entry $",       text_color=_hfg, text_size=size.small, bgcolor=_hbg)
     table.cell(jTbl, 5,  0, "Exit $",        text_color=_hfg, text_size=size.small, bgcolor=_hbg)
-    table.cell(jTbl, 6,  0, "Pts",           text_color=_hfg, text_size=size.small, bgcolor=_hbg)
-    table.cell(jTbl, 7,  0, "Lots",          text_color=_hfg, text_size=size.small, bgcolor=_hbg)
-    table.cell(jTbl, 8,  0, "Cmpd P&L",      text_color=_hfg, text_size=size.small, bgcolor=_hbg)
-    table.cell(jTbl, 9,  0, "Fix P&L",       text_color=_hfg, text_size=size.small, bgcolor=_hbg)
-    table.cell(jTbl, 10, 0, "Status / Sess", text_color=_hfg, text_size=size.small, bgcolor=_hbg)
+    table.cell(jTbl, 6,  0, "SL $",          text_color=color.new(#ff4444,0), text_size=size.small, bgcolor=_hbg)
+    table.cell(jTbl, 7,  0, "Pts",           text_color=_hfg, text_size=size.small, bgcolor=_hbg)
+    table.cell(jTbl, 8,  0, "Lots",          text_color=_hfg, text_size=size.small, bgcolor=_hbg)
+    table.cell(jTbl, 9,  0, "Cmpd P&L",      text_color=_hfg, text_size=size.small, bgcolor=_hbg)
+    table.cell(jTbl, 10, 0, "Fix P&L",       text_color=_hfg, text_size=size.small, bgcolor=_hbg)
+    table.cell(jTbl, 11, 0, "Status / Sess", text_color=_hfg, text_size=size.small, bgcolor=_hbg)
 
     _n = array.size(jDir)
     for r = 0 to maxJRows - 1
@@ -473,6 +518,7 @@ if barstate.islast and showJournal
             _se   = array.get(jSess,    r)
             _lots = array.get(jLots,    r)
             _cpnl = array.get(jCmpdPnl, r)
+            _sl   = array.size(jSL) > r ? array.get(jSL, r) : na
             _win  = _st == "TP1 + TP2" or _st == "TP2 ✓"
             _bg   = _win ? color.new(#0a1f0a,0) : color.new(#1f0a0a,0)
             _pc   = _win ? color.new(#26a69a,0) : color.new(#f23645,0)
@@ -484,13 +530,14 @@ if barstate.islast and showJournal
             table.cell(jTbl, 3,  _row, fmtT(_outT),                                                  text_color=color.silver,          text_size=size.small, bgcolor=_bg)
             table.cell(jTbl, 4,  _row, fmtPx(_ent),                                                  text_color=color.new(#90caf9,0),  text_size=size.small, bgcolor=_bg)
             table.cell(jTbl, 5,  _row, fmtPx(_ext),                                                  text_color=_pc,                   text_size=size.small, bgcolor=_bg)
-            table.cell(jTbl, 6,  _row, (_pts >= 0 ? "+" : "") + str.tostring(_pts),                  text_color=_pc,                   text_size=size.small, bgcolor=_bg)
-            table.cell(jTbl, 7,  _row, str.tostring(_lots),                                           text_color=color.new(#d1d5db,0),  text_size=size.small, bgcolor=_bg)
-            table.cell(jTbl, 8,  _row, (_cpnl >= 0 ? "+$" : "-$") + str.tostring(math.abs(_cpnl)),   text_color=_pc,                   text_size=size.small, bgcolor=_bg)
-            table.cell(jTbl, 9,  _row, (_pnl  >= 0 ? "+$" : "-$") + str.tostring(math.abs(_pnl)),   text_color=_pc,                   text_size=size.small, bgcolor=_bg)
-            table.cell(jTbl, 10, _row, _st + " · " + _se,                                             text_color=_pc,                   text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 6,  _row, na(_sl) ? "—" : str.tostring(math.round(_sl,1)),               text_color=color.new(#ff4444,0),  text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 7,  _row, (_pts >= 0 ? "+" : "") + str.tostring(_pts),                  text_color=_pc,                   text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 8,  _row, str.tostring(_lots),                                           text_color=color.new(#d1d5db,0),  text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 9,  _row, (_cpnl >= 0 ? "+$" : "-$") + str.tostring(math.abs(_cpnl)),   text_color=_pc,                   text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 10, _row, (_pnl  >= 0 ? "+$" : "-$") + str.tostring(math.abs(_pnl)),   text_color=_pc,                   text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 11, _row, _st + " · " + _se,                                             text_color=_pc,                   text_size=size.small, bgcolor=_bg)
         else
-            for c = 0 to 10
+            for c = 0 to 11
                 table.cell(jTbl, c, _row, "", text_size=size.small, bgcolor=color.new(#111111,0))
 
     _liveRow = maxJRows + 1
@@ -507,13 +554,14 @@ if barstate.islast and showJournal
         table.cell(jTbl, 3,  _liveRow, "—",                                                             text_color=color.gray,            text_size=size.small, bgcolor=_lbg)
         table.cell(jTbl, 4,  _liveRow, fmtPx(tEntry),                                                  text_color=color.new(#90caf9,0),  text_size=size.small, bgcolor=_lbg)
         table.cell(jTbl, 5,  _liveRow, fmtPx(close),                                                   text_color=_lCol,                 text_size=size.small, bgcolor=_lbg)
-        table.cell(jTbl, 6,  _liveRow, (_lPts >= 0 ? "+" : "") + str.tostring(_lPts),                  text_color=_lCol,                 text_size=size.small, bgcolor=_lbg)
-        table.cell(jTbl, 7,  _liveRow, str.tostring(calcLots),                                          text_color=color.new(#d1d5db,0),  text_size=size.small, bgcolor=_lbg)
-        table.cell(jTbl, 8,  _liveRow, (_lCpnl >= 0 ? "+$" : "-$") + str.tostring(math.abs(_lCpnl)),  text_color=_lCol,                 text_size=size.small, bgcolor=_lbg)
-        table.cell(jTbl, 9,  _liveRow, (_lPnl  >= 0 ? "+$" : "-$") + str.tostring(math.abs(_lPnl)),   text_color=_lCol,                 text_size=size.small, bgcolor=_lbg)
-        table.cell(jTbl, 10, _liveRow, tTP1Hit ? "TP1 Hit · 50% Booked" : "Open",                      text_color=color.yellow,          text_size=size.small, bgcolor=_lbg)
+        table.cell(jTbl, 6,  _liveRow, str.tostring(math.round(tSL,1)),                                 text_color=color.new(#ff4444,0),  text_size=size.small, bgcolor=_lbg)
+        table.cell(jTbl, 7,  _liveRow, (_lPts >= 0 ? "+" : "") + str.tostring(_lPts),                  text_color=_lCol,                 text_size=size.small, bgcolor=_lbg)
+        table.cell(jTbl, 8,  _liveRow, str.tostring(calcLots),                                          text_color=color.new(#d1d5db,0),  text_size=size.small, bgcolor=_lbg)
+        table.cell(jTbl, 9,  _liveRow, (_lCpnl >= 0 ? "+$" : "-$") + str.tostring(math.abs(_lCpnl)),  text_color=_lCol,                 text_size=size.small, bgcolor=_lbg)
+        table.cell(jTbl, 10, _liveRow, (_lPnl  >= 0 ? "+$" : "-$") + str.tostring(math.abs(_lPnl)),   text_color=_lCol,                 text_size=size.small, bgcolor=_lbg)
+        table.cell(jTbl, 11, _liveRow, tTP1Hit ? "TP1 Hit · 50% Booked" : "Open",                      text_color=color.yellow,          text_size=size.small, bgcolor=_lbg)
     else
-        for c = 0 to 10
+        for c = 0 to 11
             table.cell(jTbl, c, _liveRow, "", bgcolor=color.new(#111111,0))
 
     // ── Journal summary: totals of VISIBLE rows only ──────────────
@@ -544,11 +592,12 @@ if barstate.islast and showJournal
     table.cell(jTbl, 3,  _statsRow, "", text_color=color.gray, text_size=size.small, bgcolor=_sbg)
     table.cell(jTbl, 4,  _statsRow, "", text_color=color.gray, text_size=size.small, bgcolor=_sbg)
     table.cell(jTbl, 5,  _statsRow, "", text_color=color.gray, text_size=size.small, bgcolor=_sbg)
-    table.cell(jTbl, 6,  _statsRow, _visPtsStr,  text_color=_visPtsCol,  text_size=size.small, bgcolor=_sbg)
-    table.cell(jTbl, 7,  _statsRow, "",           text_color=color.gray,  text_size=size.small, bgcolor=_sbg)
-    table.cell(jTbl, 8,  _statsRow, _visCPnlStr, text_color=_visCPnlCol, text_size=size.small, bgcolor=_sbg)
-    table.cell(jTbl, 9,  _statsRow, _visPnlStr,  text_color=_visPnlCol,  text_size=size.small, bgcolor=_sbg)
-    table.cell(jTbl, 10, _statsRow, "",           text_color=color.gray,  text_size=size.small, bgcolor=_sbg)
+    table.cell(jTbl, 6,  _statsRow, "",           text_color=color.gray,  text_size=size.small, bgcolor=_sbg)
+    table.cell(jTbl, 7,  _statsRow, _visPtsStr,  text_color=_visPtsCol,  text_size=size.small, bgcolor=_sbg)
+    table.cell(jTbl, 8,  _statsRow, "",           text_color=color.gray,  text_size=size.small, bgcolor=_sbg)
+    table.cell(jTbl, 9,  _statsRow, _visCPnlStr, text_color=_visCPnlCol, text_size=size.small, bgcolor=_sbg)
+    table.cell(jTbl, 10, _statsRow, _visPnlStr,  text_color=_visPnlCol,  text_size=size.small, bgcolor=_sbg)
+    table.cell(jTbl, 11, _statsRow, "",           text_color=color.gray,  text_size=size.small, bgcolor=_sbg)
 
 // ═══════════════════════════════════════════════════════════
 // ALL-TIME STATS TABLE  (bottom-left)
@@ -603,3 +652,4 @@ if barstate.islast and showJournal
 alertcondition(volSurgeLong,  "Vol Surge BUY",  '{"signal":"BUY","secret":"VolSurge2026#Railway$BTC"}')
 alertcondition(volSurgeShort, "Vol Surge SELL", '{"signal":"SELL","secret":"VolSurge2026#Railway$BTC"}')
 alertcondition(volSurgeLong or volSurgeShort, "Vol Surge ANY", '{"signal":"ANY","secret":"VolSurge2026#Railway$BTC"}')
+
