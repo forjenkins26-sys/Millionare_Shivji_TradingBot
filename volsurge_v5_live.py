@@ -1355,6 +1355,8 @@ async def _orphan_recovery():
       5. Sets open_trade state (recovery_event=True) and starts position monitor
       6. Sends Telegram alert
     """
+    global open_trade   # declared at top — Python 3.12 requires this before any use
+
     if PAPER_MODE:
         return
 
