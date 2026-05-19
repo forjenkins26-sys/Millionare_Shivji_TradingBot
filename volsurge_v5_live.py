@@ -1782,19 +1782,30 @@ async def dashboard():
             return f"{s//60}m {s%60}s" if s >= 60 else f"{s}s"
         except: return "—"
 
-    def _dt(v):
+    def _to_ist(v):
+        """Parse Unix float OR ISO string → IST naive datetime.
+        entry_fill_time / signal_recv_time are stored as Unix floats (time.time()).
+        exit_time is stored as ISO string (datetime.now().isoformat()).
+        Both must work here."""
+        s = str(v).strip()
+        # Try Unix timestamp first (covers entry_fill_time, signal_recv_time, etc.)
         try:
-            return (datetime.fromisoformat(str(v)[:19]) + timedelta(seconds=19800)).strftime("%d/%m %H:%M")
+            return datetime.utcfromtimestamp(float(s)) + timedelta(seconds=19800)
+        except (ValueError, OverflowError, OSError):
+            pass
+        # Fall back to ISO string (covers exit_time, etc.)
+        return datetime.fromisoformat(s[:19]) + timedelta(seconds=19800)
+
+    def _dt(v):
+        try: return _to_ist(v).strftime("%d/%m %H:%M")
         except: return "—"
 
     def _date(v):
-        try:
-            return (datetime.fromisoformat(str(v)[:19]) + timedelta(seconds=19800)).strftime("%d/%m")
+        try: return _to_ist(v).strftime("%d/%m")
         except: return "—"
 
     def _time_only(v):
-        try:
-            return (datetime.fromisoformat(str(v)[:19]) + timedelta(seconds=19800)).strftime("%H:%M")
+        try: return _to_ist(v).strftime("%H:%M")
         except: return "—"
 
     def _pc(v):
@@ -1997,8 +2008,8 @@ async def dashboard():
           <td style="color:#d1d5db;font-size:11px;">{_dt(t.get('entry_fill_time',''))}</td>
           <td style="color:#9ca3af;text-align:center;">{t.get('signal_timeframe','—')}</td>
           <td style="color:#e5e7eb;text-align:right;">{_f(t.get('fill_price',''))}</td>
-          <td style="color:#34d399;text-align:right;">{_f(t.get('pine_tp',''))}</td>
-          <td style="color:#f87171;text-align:right;">{_f(t.get('pine_sl',''))}</td>
+          <td style="color:#34d399;text-align:right;">{_f(t.get('tp_price',''))}</td>
+          <td style="color:#f87171;text-align:right;">{_f(t.get('sl_price',''))}</td>
           <td style="color:#e5e7eb;text-align:right;">{_f(t.get('exit_price',''))}</td>
           <td style="text-align:right;">{_pc(t.get('pts',''))}</td>
           <td style="color:#9ca3af;text-align:right;">{_pts(t.get('pnl_approx',''))}</td>
@@ -2046,7 +2057,7 @@ async def dashboard():
           <td style="color:#d1d5db;font-size:11px;">{_time_only(t.get('exit_time',''))}</td>
           <td style="color:#e5e7eb;text-align:right;">{_f(t.get('fill_price',''))}</td>
           <td style="color:#e5e7eb;text-align:right;">{_f(t.get('exit_price',''))}</td>
-          <td style="color:#f87171;text-align:right;">{_f(t.get('pine_sl',''))}</td>
+          <td style="color:#f87171;text-align:right;">{_f(t.get('sl_price',''))}</td>
           <td style="color:{pts_col};text-align:right;font-weight:700;">{'+' if pts_val>=0 else ''}{pts_val:.1f}</td>
           <td style="color:#9ca3af;text-align:right;">{lot_val}</td>
           <td style="color:{pnl_col};text-align:right;font-weight:700;">{'+' if pnl_val>=0 else ''}{pnl_val:.2f}</td>
