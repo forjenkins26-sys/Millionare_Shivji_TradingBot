@@ -519,6 +519,15 @@ def cancel_all_open_orders():
                 _delete(f"/v2/orders/{oid}")
                 _log(f"cancel_all: cancelled {state} order {oid}")
 
+def get_open_orders() -> list:
+    """Return list of open/pending orders for this product."""
+    orders = []
+    for state in ("open", "pending"):
+        resp = _get("/v2/orders", {"product_id": str(PRODUCT_ID), "state": state})
+        if resp:
+            orders.extend(resp.get("result", []))
+    return orders
+
 # ════════════════════════════════════════════════════════════════════════
 # PRE-FLIGHT VALIDATION
 # ════════════════════════════════════════════════════════════════════════
@@ -1314,12 +1323,187 @@ async def startup():
     asyncio.create_task(feed.start())
     asyncio.create_task(_feed_watchdog())
 
+    # OOM / hard-crash orphan recovery — detects untracked Delta positions
+    # that survived a Railway kill with no SIGTERM (only runs in LIVE mode)
+    asyncio.create_task(_orphan_recovery())
+
     tg(
         f"{'📄 PAPER' if PAPER_MODE else '🟢 LIVE'} <b>Vol Surge v5 started</b>\n"
         f"Signal: WebSocket-native (no TV webhook)\n"
         f"Candles: {'Heikin-Ashi ✓' if USE_HA else 'Regular OHLC'}\n"
         f"SL_MULT={SL_MULT} TP_R={TP_R} BURST_MULT={VS_BURST_MULT}"
     )
+
+
+async def _orphan_recovery():
+    """
+    OOM / hard-crash recovery — runs once on startup.
+
+    Handles the case where Railway was killed without SIGTERM so state.json
+    was never written, yet a real Delta position is still open.
+
+    Conditions to activate (ALL must be true):
+      - LIVE mode (paper has no real positions)
+      - open_trade is None  (normal state.json recovery already handled its case)
+      - Delta REST reports an open position for PRODUCT_ID
+
+    What it does:
+      1. Waits up to 60s for the candle buffer to be ready (needs ATR for SL/TP)
+      2. Reads entry_price + direction from Delta position
+      3. Scans open orders for a reduce-only limit order → reuse as TP
+      4. Reconstructs SL/TP using atr5[1] × SL_MULT (same formula as live entries)
+      5. Sets open_trade state (recovery_event=True) and starts position monitor
+      6. Sends Telegram alert
+    """
+    if PAPER_MODE:
+        return
+
+    # Only run if normal state.json recovery did NOT already restore a trade
+    with _state_lock:
+        if open_trade is not None:
+            return
+
+    # Give the feed a moment to initialise before hitting Delta
+    await asyncio.sleep(3)
+
+    pos = get_open_position()
+    if pos is None or pos is _POS_API_ERROR:
+        return   # no orphan — clean startup
+
+    # ── Orphan detected ──────────────────────────────────────────────────
+    try:
+        size      = float(pos.get("size", 0))
+        entry_px  = float(pos.get("entry_price", 0) or pos.get("avg_entry_price", 0))
+        direction = "BUY" if size > 0 else "SELL"
+    except Exception as e:
+        _loge(f"[ORPHAN] Could not parse position: {e} | {pos}")
+        return
+
+    log.warning(
+        f"[ORPHAN] ══════════════════════════════════════\n"
+        f"[ORPHAN] Untracked open position detected!\n"
+        f"[ORPHAN] Direction={direction} entry={entry_px} size={size}\n"
+        f"[ORPHAN] Likely cause: hard crash (OOM) with no SIGTERM\n"
+        f"[ORPHAN] ══════════════════════════════════════"
+    )
+
+    # ── Wait for candle buffer so we can compute ATR ──────────────────────
+    log.info("[ORPHAN] Waiting for candle buffer (max 60s)...")
+    for _ in range(60):
+        if feed.is_ready and len(feed.buffer) >= 6:
+            break
+        await asyncio.sleep(1)
+
+    # ── Compute sl_dist from current atr5[1] × SL_MULT ────────────────────
+    try:
+        buf     = list(feed.buffer)
+        trs     = [max(c.high - c.low,
+                       abs(c.high - buf[i-1].close) if i > 0 else 0,
+                       abs(c.low  - buf[i-1].close) if i > 0 else 0)
+                   for i, c in enumerate(buf[-6:])]
+        atr5_prev = sum(trs[-6:-1]) / 5 if len(trs) >= 6 else sum(trs) / max(len(trs), 1)
+        sl_dist   = round(atr5_prev * SL_MULT, 1)
+    except Exception as e:
+        _loge(f"[ORPHAN] ATR calc failed: {e} — using 0.3% fallback")
+        sl_dist = round((entry_px or fetch_price() or 77000) * 0.003, 1)
+
+    sl_dist = max(sl_dist, 50.0)   # safety floor — never < 50 pts
+
+    # ── Reconstruct SL / TP ───────────────────────────────────────────────
+    if direction == "BUY":
+        sl_price = round(entry_px - sl_dist, 1)
+        tp_price = round(entry_px + sl_dist * TP_R, 1)
+    else:
+        sl_price = round(entry_px + sl_dist, 1)
+        tp_price = round(entry_px - sl_dist * TP_R, 1)
+
+    # ── Look for surviving TP limit order on Delta ─────────────────────────
+    tp_oid = None
+    try:
+        for o in get_open_orders():
+            if (o.get("reduce_only") and
+                    o.get("order_type") == "limit_order" and
+                    str(o.get("product_id", "")) == str(PRODUCT_ID)):
+                tp_oid = str(o.get("id", ""))
+                found_limit_px = float(o.get("limit_price", 0))
+                log.info(f"[ORPHAN] Existing TP order found: oid={tp_oid} px={found_limit_px}")
+                break
+    except Exception as e:
+        _loge(f"[ORPHAN] Open order scan failed: {e}")
+
+    # If no TP order survived, place a fresh one
+    if not tp_oid:
+        log.info(f"[ORPHAN] No TP order on Delta — placing new limit @ {tp_price}")
+        close_side = "sell" if direction == "BUY" else "buy"
+        contracts  = _btc_to_contracts(LOT_SIZE, entry_px)
+        tp_resp    = place_tp_order(close_side, LOT_SIZE, tp_price, contracts=contracts)
+        tp_oid     = tp_resp.get("order_id") if tp_resp else None
+
+    # ── Reconstruct open_trade state ──────────────────────────────────────
+    trade_id = f"ORPHAN_{int(time.time() * 1000)}"
+    now      = time.time()
+    now_ms   = int(now * 1000)
+
+    with _state_lock:
+        global open_trade
+        open_trade = {
+            "state":              STATE_ENTERED,
+            "trade_id":           trade_id,
+            "direction":          direction,
+            "mode":               "LIVE",
+            "monitor_cycles":     0,
+            "fill_price":         entry_px,
+            "pine_entry_px":      entry_px,
+            "sl_dist":            sl_dist,
+            "sl_price":           sl_price,
+            "tp_price":           tp_price,
+            "sl_oid":             None,       # software SL — no exchange order
+            "tp_oid":             tp_oid,
+            "entry_slippage_pts": 0.0,
+            "signal_latency_ms":  0.0,
+            "entry_latency_ms":   0.0,
+            "pine_signal_time":   now_ms,
+            "signal_recv_time":   now,
+            "entry_fill_time":    now,
+            "entry_time":         datetime.now(timezone.utc).isoformat(),
+            "slippage_ratio":     0.0,
+            "structure_grade":    "RECOVERED",
+            "entry_slippage_pct": 0.0,
+            "recovery_event":     True,
+            "recovery_reason":    "OOM_ORPHAN",
+            "entry_order_id":     None,
+            "api_request_time":   None,
+            "api_ack_time":       None,
+            "sl_placed_time":     None,
+            "tp_placed_time":     now if tp_oid else None,
+            "exit_order_id":      None,
+            "exit_fill_px_delta": None,
+            "chop_avg_tr":        0.0,
+            "burst_threshold":    0.0,
+            "candle_body":        0.0,
+            "signal_timeframe":   "15",
+            "signal_tf_bar_time": "",
+            "pine_tp":            tp_price,
+            "pine_sl":            sl_price,
+        }
+        save_state()
+        _preflight_ok = True
+
+    log.warning(
+        f"[ORPHAN] State reconstructed | trade_id={trade_id} "
+        f"sl={sl_price} tp={tp_price} tp_oid={tp_oid}"
+    )
+
+    tg(
+        f"⚠️ <b>ORPHAN TRADE RECOVERED</b>\n"
+        f"Hard crash detected — position was untracked\n"
+        f"Direction: <b>{direction}</b> | Entry: {entry_px:,.1f}\n"
+        f"SL (reconstructed): {sl_price:,.1f} | TP (reconstructed): {tp_price:,.1f}\n"
+        f"TP order: {'oid=' + tp_oid if tp_oid else '⚠️ failed to place'}\n"
+        f"Monitor resuming — trade_id: {trade_id}"
+    )
+
+    threading.Thread(target=_position_monitor, daemon=True, name="mon-orphan").start()
 
 
 async def _feed_watchdog():
