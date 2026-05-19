@@ -1447,7 +1447,6 @@ async def _orphan_recovery():
     now_ms   = int(now * 1000)
 
     with _state_lock:
-        global open_trade
         open_trade = {
             "state":              STATE_ENTERED,
             "trade_id":           trade_id,
