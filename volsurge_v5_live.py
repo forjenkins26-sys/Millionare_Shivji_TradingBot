@@ -147,6 +147,10 @@ _state_lock        = threading.Lock()
 _entry_processing  = False
 _preflight_ok      = False
 
+# Sentinel returned by get_open_position() when the API call itself fails.
+# Distinct from None (= "no open position, call succeeded").
+_POS_API_ERROR = object()
+
 def _tid() -> str:
     return open_trade.get("trade_id", "?") if open_trade else "IDLE"
 
@@ -401,10 +405,16 @@ def tg(msg: str):
 # ════════════════════════════════════════════════════════════════════════
 # EXCHANGE HELPERS
 # ════════════════════════════════════════════════════════════════════════
-def get_open_position() -> Optional[dict]:
+def get_open_position():
+    """
+    Returns:
+      dict               — open position exists (size != 0)
+      None               — API call succeeded, no position open
+      _POS_API_ERROR     — API call failed (network/auth error) — do NOT treat as flat
+    """
     resp = _get("/v2/positions", {"product_id": str(PRODUCT_ID)})
-    if not resp:
-        return None
+    if resp is None:
+        return _POS_API_ERROR   # network/auth error — caller must handle this
     result = resp.get("result", [])
     if isinstance(result, list):
         for p in result:
@@ -529,14 +539,20 @@ def run_preflight() -> dict:
 
     if not PAPER_MODE:
         pos = get_open_position()
-        ok  = pos is None
-        results["no_open_position"] = {
-            "ok": ok,
-            "detail": f"size={pos.get('size')} entry={pos.get('entry_price')}" if pos else "flat",
-        }
-        if not ok:
+        if pos is _POS_API_ERROR:
+            ok = False
+            results["no_open_position"] = {"ok": False, "detail": "API error fetching positions"}
             passed = False
-            _loge("PRE-FLIGHT FAIL: stale open position — close manually before trading")
+            _loge("PRE-FLIGHT FAIL: could not verify position state — API error")
+        else:
+            ok = pos is None
+            results["no_open_position"] = {
+                "ok": ok,
+                "detail": f"size={pos.get('size')} entry={pos.get('entry_price')}" if pos else "flat",
+            }
+            if not ok:
+                passed = False
+                _loge("PRE-FLIGHT FAIL: stale open position — close manually before trading")
 
     stale = load_state()
     ok    = stale is None
@@ -872,6 +888,11 @@ def _position_monitor():
             else:
                 # LIVE: detect position flat
                 pos = get_open_position()
+                if pos is _POS_API_ERROR:
+                    # API call failed — could be a network blip. DO NOT treat as flat.
+                    # Just skip this tick; we'll check again on the next cycle.
+                    _logw("[MON] get_open_position API error — skip tick, not treating as flat")
+                    continue
                 if pos is None:
                     _logw(f"[LIVE] Position flat @ approx price={price}")
                     _log_lifecycle(open_trade["trade_id"], "MONITOR_FLAT", notes=f"approx={price}")
@@ -972,13 +993,29 @@ def _process_entry(
             if not fill_px:
                 time.sleep(1.5)
                 pos = get_open_position()
-                fill_px = float(pos.get("entry_price", pine_entry_px)) if pos else pine_entry_px
+                if pos and pos is not _POS_API_ERROR:
+                    fill_px = float(pos.get("entry_price", pine_entry_px))
+                else:
+                    fill_px = pine_entry_px
             fill_px = round(fill_px, 1)
 
             # Fill-based SL/TP
             close_side = "sell" if d == "BUY" else "buy"
             sl_price   = round(fill_px - sl_dist, 1) if d == "BUY" else round(fill_px + sl_dist, 1)
             tp_price   = round(fill_px + sl_dist * TP_R, 1) if d == "BUY" else round(fill_px - sl_dist * TP_R, 1)
+
+            # For stop orders, Delta requires stop_price to be away from mark price.
+            # BUY stop (close SELL): stop_price must be ABOVE mark price.
+            # SELL stop (close BUY): stop_price must be BELOW mark price.
+            # Add a small safety buffer to ensure the order is accepted.
+            _mark = fetch_price() or fill_px
+            _sl_buffer = max(sl_dist * 0.05, 2.0)   # 5% of SL dist or min 2 pts
+            if d == "SELL" and sl_price <= _mark:
+                sl_price = round(_mark + _sl_buffer, 1)
+                _logw(f"SL stop price adjusted to {sl_price} (above mark {_mark}) to avoid rejection")
+            elif d == "BUY" and sl_price >= _mark:
+                sl_price = round(_mark - _sl_buffer, 1)
+                _logw(f"SL stop price adjusted to {sl_price} (below mark {_mark}) to avoid rejection")
 
             sl_result = place_sl_order(close_side, LOT_SIZE, sl_price, contracts=entry_contracts)
             tp_result = place_tp_order(close_side, LOT_SIZE, tp_price, contracts=entry_contracts)
@@ -1387,20 +1424,50 @@ async def test_fire(side: str, confirm: str = ""):
 @app.get("/test/close")
 async def test_close(confirm: str = ""):
     """Force-close current open trade at live price.
-    PAPER mode: fires freely.
-    LIVE mode: requires ?confirm=yes to cancel SL/TP orders and close position on Delta."""
+    PAPER mode: just updates internal state.
+    LIVE mode: requires ?confirm=yes — cancels SL/TP orders AND sends market close to Delta."""
     if not PAPER_MODE and confirm.lower() != "yes":
         return JSONResponse({
             "error": "LIVE mode — add ?confirm=yes to cancel orders and close position on Delta",
-            "warning": "This will cancel your SL/TP orders and close the open position",
+            "warning": "This will cancel your SL/TP orders and close the open position at market",
             "retry_url": "/test/close?confirm=yes"
         }, status_code=403)
+
     with _state_lock:
         if not open_trade:
             return JSONResponse({"error": "No open trade to close"}, status_code=400)
-        price = fetch_price() or float(open_trade.get("fill_price", 0))
-        _close_trade(price, "TEST_CLOSE", 0.0)
-    return JSONResponse({"test": "closed", "exit_price": price})
+        trade_snap = dict(open_trade)   # snapshot before we mutate
+
+    price = fetch_price() or float(trade_snap.get("fill_price", 0))
+
+    if not PAPER_MODE:
+        # 1. Cancel any outstanding SL / TP orders
+        for key in ("sl_oid", "tp_oid"):
+            oid = trade_snap.get(key)
+            if oid:
+                _delete(f"/v2/orders/{oid}")
+                log.info(f"[CLOSE] Cancelled {key}={oid}")
+        cancel_all_open_orders()  # belt-and-suspenders
+
+        # 2. Send market close (reduce-only)
+        d = trade_snap["direction"]
+        close_side = "sell" if d == "BUY" else "buy"
+        log.info(f"[CLOSE] Sending market {close_side} reduce-only to close {d} position")
+        close_result = place_market_order(close_side, LOT_SIZE, reduce_only=True, ref_price=price)
+        if close_result:
+            close_fill = close_result.get("fill_price") or price
+            price = round(float(close_fill), 1)
+            log.info(f"[CLOSE] Market close filled @ {price}")
+        else:
+            log.error("[CLOSE] Market close order FAILED — position may still be open on Delta")
+            tg(f"⚠️ TEST CLOSE FAILED — position still open on Delta! Close manually.")
+
+    with _state_lock:
+        if open_trade:
+            _close_trade(price, "TEST_CLOSE", 0.0)
+
+    return JSONResponse({"test": "closed", "exit_price": price,
+                         "mode": "LIVE" if not PAPER_MODE else "PAPER"})
 
 
 # ── /test/telegram ────────────────────────────────────────────────────────────
@@ -1952,7 +2019,10 @@ async def dashboard():
     const r = await fetch(url);
     const j = await r.json();
     if (j.error) {{ alert('❌ Error: ' + j.error); return; }}
-    alert(`✅ Trade closed @ ${{j.exit_price?.toLocaleString()}}\\n${{isLiveClose ? "Delta orders cancelled." : ""}}\\nRefreshing...`);
+    const closeMsg = isLiveClose
+      ? `✅ LIVE position closed @ ${{Number(j.exit_price).toLocaleString()}}\\nSL/TP orders cancelled + market close sent to Delta.\\nRefreshing...`
+      : `✅ Paper trade closed @ ${{Number(j.exit_price).toLocaleString()}}\\nRefreshing...`;
+    alert(closeMsg);
     setTimeout(() => location.reload(), 1000);
   }}
   async function testTelegram() {{
