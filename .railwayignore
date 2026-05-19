@@ -1,6 +1,5 @@
 docs/
 *.pine
-*.txt
 *.md
 logs/
 logs-v5/
