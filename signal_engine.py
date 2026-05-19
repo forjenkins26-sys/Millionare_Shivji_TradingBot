@@ -3,6 +3,7 @@
 signal_engine.py — Pine Vol Surge v5 logic ported to Python
 ============================================================
 Implements EXACT Pine parity for:
+  - Heikin-Ashi candle conversion (when use_ha=True — matches TradingView HA chart)
   - True Range  (ta.tr(true))
   - ATR5        (ta.atr(5) — Wilder's RMA, alpha=1/5)
   - EMA200      (ta.ema(close, 200) — alpha=2/201)
@@ -11,6 +12,12 @@ Implements EXACT Pine parity for:
   - SL distance (atr5[1] × sl_mult — previous bar's ATR5)
   - Cooldown counter
   - Session filter (IST = UTC+5:30)
+
+IMPORTANT — Heikin-Ashi:
+  TradingView chart set to Heikin-Ashi produces 78% WR vs 49% WR on regular candles
+  (46 trades vs 173 trades — HA is far more selective).
+  use_ha=True (default) converts regular OHLC from Delta WebSocket to HA before
+  running all indicators — this is REQUIRED for Pine parity when Pine chart is HA.
 
 Does NOT:
   - Place orders
@@ -40,9 +47,9 @@ class SignalConfig:
     """Mirrors Pine input defaults from Volume surge 5 latest.txt."""
     lookback:     int   = 5      # vsLookback — chop window (bars before current)
     burst_mult:   float = 2.0    # vsBurstMult
-    sl_mult:      float = 0.75   # vsSLMult
+    sl_mult:      float = 1.8    # vsSLMult  — Pine default 1.8
     tp1_r:        float = 1.0    # vsTP1R (kept for completeness)
-    tp2_r:        float = 2.0    # vsTP2R — single TP in v5
+    tp2_r:        float = 1.4    # vsTP2R — Pine default 1.4
     cooldown:     int   = 3      # vsCooldown bars after signal
 
     ema_length:   int   = 200    # emaLen
@@ -51,9 +58,16 @@ class SignalConfig:
 
     use_session:  bool  = False  # useSession (default OFF in Pine)
 
-    safety_factor: float = 1.15  # SIGNAL_SAFETY_FACTOR — filters borderline ATR-divergence signals
+    safety_factor: float = 1.0   # SIGNAL_SAFETY_FACTOR — 1.0 = exact Pine parity (no buffer)
                                   # body must exceed burst_threshold * safety_factor to fire
-                                  # 1.15 = +15% buffer; set to 1.0 to disable
+                                  # increase (e.g. 1.15) to add a +15% guard vs Pine
+
+    # ── Heikin-Ashi ────────────────────────────────────────────────────────────
+    # use_ha=True  → convert regular OHLC to HA before running all indicators.
+    #                REQUIRED when TradingView chart is set to Heikin-Ashi.
+    #                Produces 78% WR (46 trades) vs 49% WR (173 trades) on regular.
+    # use_ha=False → run indicators on raw OHLC (only if TV chart is regular candles).
+    use_ha: bool = True
 
     # IST = UTC+5:30 session windows
     london_open:  int   = 11
@@ -104,6 +118,62 @@ class SignalResult:
     tp1:         float  # entry ± sl_dist × tp1_r
     tp2:         float  # entry ± sl_dist × tp2_r  (= single TP in v5)
     state:       IndicatorState
+
+
+# ── Heikin-Ashi conversion ───────────────────────────────────────────────────
+
+def compute_ha_candles(candles: list) -> list:
+    """
+    Convert a list of regular OHLC Candle objects to Heikin-Ashi candles.
+
+    Matches TradingView's Heikin-Ashi calculation exactly:
+      HA_Close[i] = (Open[i] + High[i] + Low[i] + Close[i]) / 4
+      HA_Open[i]  = (HA_Open[i-1] + HA_Close[i-1]) / 2
+      HA_High[i]  = max(High[i], HA_Open[i], HA_Close[i])
+      HA_Low[i]   = min(Low[i],  HA_Open[i], HA_Close[i])
+
+    Seed (bar 0):
+      HA_Open[0]  = (Open[0] + Close[0]) / 2
+      HA_Close[0] = (Open[0] + High[0] + Low[0] + Close[0]) / 4
+
+    Returns a new list of Candle objects with HA values.
+    Timestamps and volume are preserved unchanged from the original candles.
+
+    WHY THIS MATTERS:
+      HA smooths noise — candle bodies are larger in trending bars and smaller
+      in choppy bars. This makes burst detection far more selective:
+        Regular candles → 173 trades, 49% WR
+        HA candles      →  46 trades, 78% WR  (same Pine strategy)
+    """
+    from candle_feed import Candle  # local import to avoid circular dependency
+    if not candles:
+        return []
+
+    ha = []
+    # Seed bar 0
+    ha_open_prev  = (candles[0].open + candles[0].close) / 2
+    ha_close_prev = (candles[0].open + candles[0].high + candles[0].low + candles[0].close) / 4
+    ha_high       = max(candles[0].high, ha_open_prev, ha_close_prev)
+    ha_low        = min(candles[0].low,  ha_open_prev, ha_close_prev)
+    ha.append(Candle(
+        ts=candles[0].ts, open=round(ha_open_prev, 2), high=round(ha_high, 2),
+        low=round(ha_low, 2),   close=round(ha_close_prev, 2), volume=candles[0].volume,
+    ))
+
+    for i in range(1, len(candles)):
+        c = candles[i]
+        ha_close = (c.open + c.high + c.low + c.close) / 4
+        ha_open  = (ha_open_prev + ha_close_prev) / 2
+        ha_high  = max(c.high, ha_open, ha_close)
+        ha_low   = min(c.low,  ha_open, ha_close)
+        ha.append(Candle(
+            ts=c.ts, open=round(ha_open, 2), high=round(ha_high, 2),
+            low=round(ha_low, 2), close=round(ha_close, 2), volume=c.volume,
+        ))
+        ha_open_prev  = ha_open
+        ha_close_prev = ha_close
+
+    return ha
 
 
 # ── Low-level math — exact Pine parity ───────────────────────────────────────
@@ -204,6 +274,10 @@ def compute_indicators(
     """
     Compute all Pine indicators for the most recent closed candle in `buffer`.
 
+    When cfg.use_ha=True (default), regular OHLC candles are first converted to
+    Heikin-Ashi before all indicator calculations. This matches TradingView when
+    the chart is set to Heikin-Ashi candle type (78% WR vs 49% WR on regular).
+
     Indexing mirrors Pine's bar-relative notation:
       candle_list[-1]     = current bar (just closed) = bar[0] in Pine
       candle_list[-2]     = previous bar              = bar[1] in Pine
@@ -212,12 +286,23 @@ def compute_indicators(
 
     Parameters
     ----------
-    buffer        : deque of Candle objects, newest last
+    buffer        : deque of regular OHLC Candle objects, newest last
     cfg           : SignalConfig matching Pine inputs
     cooldown_left : bars of cooldown remaining BEFORE this bar's decrement
     in_trade      : True if bot already has an open position
     """
-    candles = list(buffer)
+    raw_candles = list(buffer)
+    n = len(raw_candles)
+
+    # ── Heikin-Ashi conversion (before any indicator computation) ─────────────
+    # If use_ha=True, all indicators (ATR, EMA, body, chop) run on HA values.
+    # This is critical for Pine parity when the TradingView chart is HA.
+    if cfg.use_ha and n >= 2:
+        candles = compute_ha_candles(raw_candles)
+    else:
+        candles = raw_candles
+
+    # Re-measure after potential HA conversion (length stays the same, just safety)
     n = len(candles)
 
     # Need: lookback+1 bars before current + current = lookback+2 minimum
@@ -424,8 +509,9 @@ class SignalEngine:
         sess_dir = "OK ✓" if s.session_ok else "OFF ✗"
         sess_gate = "filter ON" if self.cfg.use_session else "filter OFF"
 
+        ha_label = "HA" if self.cfg.use_ha else "OHLC"
         self.log.info(
-            f"\n[ENGINE] ── Bar #{self._bar_count} · {dt_utc} ({dt_ist}) ──────────────────\n"
+            f"\n[ENGINE] ── Bar #{self._bar_count} · {dt_utc} ({dt_ist}) [{ha_label}] ──────────────────\n"
             f"  close          : {s.close:>12,.1f}\n"
             f"  candle body    : {s.candle_body:>12,.1f} pts\n"
             f"  chop_avg_tr    : {s.chop_avg_tr:>12,.1f} pts  (avg TR of {self.cfg.lookback} bars before)\n"

@@ -1,0 +1,19 @@
+{
+  "date": "2026-05-13",
+  "period": "last 24h",
+  "bars_logged": 11,
+  "bars_with_pine": 11,
+  "bars_auto": 11,
+  "bars_missing_pine": 0,
+  "green": 0,
+  "yellow": 10,
+  "red": 1,
+  "parity_rate_pct": 0.0,
+  "signal_match_pct": 0.0,
+  "avg_atr5_diff": 14.114,
+  "avg_threshold_diff": 28.675,
+  "confidence_score": 55,
+  "streak": 1,
+  "pass_achieved": false,
+  "anomalies_24h": 11
+}

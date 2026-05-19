@@ -3,7 +3,7 @@
 candle_feed.py — Delta Exchange WebSocket candle feed for Vol Surge v5
 ======================================================================
 Responsibilities (ONLY):
-  - Maintain a 300-candle ring buffer of closed 5-minute candles
+  - Maintain a 300-candle ring buffer of closed 15-minute candles
   - Maintain current mark price
   - REST backfill on startup and after reconnect gaps
   - Auto-reconnect with exponential backoff
@@ -47,7 +47,7 @@ _HEARTBEAT_INTERVAL = 30.0   # seconds between keepalive pings to Delta
 
 @dataclass
 class Candle:
-    """One closed 5-minute candle."""
+    """One closed 15-minute candle."""
     ts:     int    # candle start (Unix seconds, UTC)
     open:   float
     high:   float
@@ -75,7 +75,7 @@ class Candle:
 
 class CandleFeed:
     """
-    Real-time buffer of closed 5-minute candles from Delta Exchange WebSocket.
+    Real-time buffer of closed 15-minute candles from Delta Exchange WebSocket.
 
     Parameters
     ----------
@@ -114,7 +114,7 @@ class CandleFeed:
 
     @property
     def is_ready(self) -> bool:
-        """True when backfill loaded ≥ 250 bars (enough for EMA200 warmup)."""
+        """True when backfill loaded ≥ 250 bars (enough for EMA200 warmup on 15m)."""
         return self._warmed_up and len(self.buffer) >= 250
 
     async def start(self):
@@ -157,7 +157,7 @@ class CandleFeed:
         self.log.info(f"[FEED] REST backfill: requesting {count} candles...")
         try:
             end_ts   = int(time.time())
-            start_ts = end_ts - count * 300 - 600   # 5-min bars + small buffer
+            start_ts = end_ts - count * 900 - 1800   # 15-min bars (900s each) + small buffer
 
             raw = await asyncio.get_event_loop().run_in_executor(
                 None,
@@ -165,7 +165,7 @@ class CandleFeed:
                     f"{REST_URL}/v2/history/candles",
                     params={
                         "symbol":     self.symbol,
-                        "resolution": "5m",    # Delta requires "5m" not "5"
+                        "resolution": "15m",   # Delta requires "15m" not "15"
                         "start":      start_ts,
                         "end":        end_ts,
                     },
@@ -181,10 +181,14 @@ class CandleFeed:
                 self._warmed_up = True
                 return
 
+            now = int(time.time())
             loaded = 0
             for c in reversed(candles_raw):   # oldest → newest: buffer[-1] = current
                 candle = self._parse_rest_candle(c)
-                if candle:
+                # Skip the currently forming bar — bar closes at ts + 900.
+                # If bar hasn't closed yet, exclude it so the WebSocket can
+                # emit the real close (avoids dedup-skipping the close callback).
+                if candle and candle.ts + 900 <= now:
                     self.buffer.append(candle)
                     self.last_closed = candle
                     loaded += 1
@@ -206,9 +210,9 @@ class CandleFeed:
             await self._backfill(300)
             return
 
-        gap_start  = self.last_closed.ts + 300
+        gap_start  = self.last_closed.ts + 900
         gap_end    = int(time.time())
-        gap_bars   = (gap_end - gap_start) // 300
+        gap_bars   = (gap_end - gap_start) // 900
 
         if gap_bars < 1:
             self.log.info("[FEED] Gap < 1 bar — no REST fill needed")
@@ -222,7 +226,7 @@ class CandleFeed:
                     f"{REST_URL}/v2/history/candles",
                     params={
                         "symbol":     self.symbol,
-                        "resolution": "5m",    # Delta requires "5m" not "5"
+                        "resolution": "15m",   # Delta requires "15m" not "15"
                         "start":      gap_start,
                         "end":        gap_end,
                     },
@@ -231,10 +235,12 @@ class CandleFeed:
             )
             # Delta returns newest-first — reverse for oldest-first append order
             candles_raw = raw.get("result", raw.get("data", []))
+            now2 = int(time.time())
             filled = 0
             for c in reversed(candles_raw):
                 candle = self._parse_rest_candle(c)
-                if candle and candle.ts > self.last_closed.ts:
+                # Only include bars that have fully closed (ts + 900 <= now)
+                if candle and candle.ts > self.last_closed.ts and candle.ts + 900 <= now2:
                     self.buffer.append(candle)
                     self.last_closed = candle
                     filled += 1
@@ -300,13 +306,13 @@ class CandleFeed:
             "type": "subscribe",
             "payload": {
                 "channels": [
-                    {"name": "candlestick_5m", "symbols": [self.symbol]},
-                    {"name": "mark_price",     "symbols": [self.symbol]},
+                    {"name": "candlestick_15m", "symbols": [self.symbol]},
+                    {"name": "mark_price",      "symbols": [self.symbol]},
                 ]
             }
         }
         await ws.send(json.dumps(sub))
-        self.log.info(f"[FEED] Subscribed to candlestick_5m + mark_price [{self.symbol}]")
+        self.log.info(f"[FEED] Subscribed to candlestick_15m + mark_price [{self.symbol}]")
 
     async def _heartbeat(self, ws):
         while True:
