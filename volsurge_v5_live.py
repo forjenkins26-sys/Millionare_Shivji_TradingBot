@@ -1252,13 +1252,30 @@ async def _feed_watchdog():
 async def health():
     price = fetch_price()
     with _state_lock:
-        trade_info = {
-            "in_trade":    open_trade is not None,
-            "direction":   open_trade.get("direction") if open_trade else None,
-            "fill_price":  open_trade.get("fill_price") if open_trade else None,
-            "sl_price":    open_trade.get("sl_price") if open_trade else None,
-            "tp_price":    open_trade.get("tp_price") if open_trade else None,
-        }
+        if open_trade:
+            d          = open_trade.get("direction")
+            fill_px    = open_trade.get("fill_price", 0)
+            sl_px      = open_trade.get("sl_price", 0)
+            tp_px      = open_trade.get("tp_price", 0)
+            unreal_pts = round((price - fill_px) if d == "BUY" else (fill_px - price), 1) if price else None
+            dist_sl    = round(abs(price - sl_px), 1) if price else None
+            dist_tp    = round(abs(tp_px - price), 1) if price else None
+            trade_info = {
+                "in_trade":        True,
+                "trade_id":        open_trade.get("trade_id"),
+                "direction":       d,
+                "fill_price":      fill_px,
+                "sl_price":        sl_px,
+                "tp_price":        tp_px,
+                "unrealised_pts":  unreal_pts,
+                "dist_to_sl_pts":  dist_sl,
+                "dist_to_tp_pts":  dist_tp,
+                "entry_time":      open_trade.get("entry_time"),
+                "signal_lat_ms":   open_trade.get("signal_latency_ms"),
+                "lot_size":        open_trade.get("lot_size"),
+            }
+        else:
+            trade_info = {"in_trade": False}
     return JSONResponse({
         "status":          "healthy" if feed.connected and feed.is_ready else "degraded",
         "bot":             "Vol Surge v5 Live",
