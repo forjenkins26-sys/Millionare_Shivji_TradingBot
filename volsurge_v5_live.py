@@ -1331,18 +1331,24 @@ async def preflight():
 
 # ── /test/fire/{side} ────────────────────────────────────────────────────────
 @app.get("/test/fire/{side}")
-async def test_fire(side: str):
-    """Inject a fake BUY or SELL signal — PAPER MODE only."""
-    if not PAPER_MODE:
-        return JSONResponse({"error": "Test fire only allowed in PAPER mode"}, status_code=403)
+async def test_fire(side: str, confirm: str = ""):
+    """Inject a fake BUY or SELL signal.
+    PAPER mode: fires freely.
+    LIVE mode:  requires ?confirm=yes — places REAL orders on Delta Exchange."""
     side = side.upper()
     if side not in ("BUY", "SELL"):
         raise HTTPException(400, "Use /test/fire/buy or /test/fire/sell")
+    if not PAPER_MODE and confirm.lower() != "yes":
+        return JSONResponse({
+            "error": "LIVE mode — add ?confirm=yes to place real orders on Delta",
+            "warning": f"This will place a REAL {side} market order for {LOT_SIZE} BTC (~${round(LOT_SIZE*(fetch_price() or 77000))} USD)",
+            "retry_url": f"/test/fire/{side.lower()}?confirm=yes"
+        }, status_code=403)
     with _state_lock:
         if open_trade:
             return JSONResponse({"error": "Already in trade — close it first with /test/close"}, status_code=400)
     price   = fetch_price() or 77000.0
-    sl_dist = 200.0
+    sl_dist = round(price * 0.003, 1)  # ~0.3% of price as SL distance
     tp_dist = round(sl_dist * TP_R, 1)
     pine_sl = round(price - sl_dist if side == "BUY" else price + sl_dist, 1)
     pine_tp = round(price + tp_dist if side == "BUY" else price - tp_dist, 1)
@@ -1890,22 +1896,28 @@ async def dashboard():
     &nbsp;|&nbsp; Data: <code style="color:#60a5fa">{DATA_DIR}</code>
     &nbsp;|&nbsp; <span style="color:#4ade80">⚡ WebSocket-native (&lt;100ms)</span>
   </div>
-  {'<div style="display:flex;gap:8px;align-items:center;">' if PAPER_MODE else ''}
-  {'<span style="color:#6b7280;font-size:11px;">🧪 Paper test:</span>' if PAPER_MODE else ''}
-  {'<button onclick="testFire(\'BUY\')"  style="background:#14532d;color:#4ade80;border:1px solid #166534;border-radius:5px;padding:4px 12px;font-size:11px;cursor:pointer;">▲ Test BUY</button>' if PAPER_MODE else ''}
-  {'<button onclick="testFire(\'SELL\')" style="background:#450a0a;color:#f87171;border:1px solid #7f1d1d;border-radius:5px;padding:4px 12px;font-size:11px;cursor:pointer;">▼ Test SELL</button>' if PAPER_MODE else ''}
-  {'<button onclick="testClose()"        style="background:#1e293b;color:#9ca3af;border:1px solid #334155;border-radius:5px;padding:4px 12px;font-size:11px;cursor:pointer;">✖ Close Trade</button>' if PAPER_MODE else ''}
-  {'<button onclick="testTelegram()"     style="background:#1e293b;color:#60a5fa;border:1px solid #1e40af;border-radius:5px;padding:4px 12px;font-size:11px;cursor:pointer;">📨 Test TG</button>' if PAPER_MODE else ''}
-  {'</div>' if PAPER_MODE else ''}
+  <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+    {'<span style="color:#6b7280;font-size:11px;">🧪 Paper:</span>' if PAPER_MODE else '<span style="color:#f59e0b;font-size:11px;font-weight:700;">⚠️ LIVE test (real orders):</span>'}
+    <button onclick="testFire('BUY')"  style="background:#14532d;color:#4ade80;border:1px solid #166534;border-radius:5px;padding:4px 12px;font-size:11px;cursor:pointer;">▲ Test BUY</button>
+    <button onclick="testFire('SELL')" style="background:#450a0a;color:#f87171;border:1px solid #7f1d1d;border-radius:5px;padding:4px 12px;font-size:11px;cursor:pointer;">▼ Test SELL</button>
+    <button onclick="testClose()"      style="background:#1e293b;color:#9ca3af;border:1px solid #334155;border-radius:5px;padding:4px 12px;font-size:11px;cursor:pointer;">✖ Close Trade</button>
+    <button onclick="testTelegram()"   style="background:#1e293b;color:#60a5fa;border:1px solid #1e40af;border-radius:5px;padding:4px 12px;font-size:11px;cursor:pointer;">📨 Test TG</button>
+  </div>
 </div>
 
 <script>
   async function testFire(side) {{
-    const r = await fetch(`/test/fire/${{side.toLowerCase()}}`);
+    const isLive = '{'' if PAPER_MODE else 'LIVE'}' === 'LIVE';
+    if (isLive) {{
+      const ok = confirm(`⚠️ LIVE MODE — This will place a REAL ${{side}} market order on Delta Exchange for {LOT_SIZE} BTC.\\n\\nSL and TP orders will also be placed automatically.\\n\\nProceed?`);
+      if (!ok) return;
+    }}
+    const url = isLive ? `/test/fire/${{side.toLowerCase()}}?confirm=yes` : `/test/fire/${{side.toLowerCase()}}`;
+    const r = await fetch(url);
     const j = await r.json();
-    if (j.error) {{ alert('Error: ' + j.error); return; }}
-    alert(`✅ Test ${{side}} fired!\\nEntry: ${{j.price?.toLocaleString()}}\\nSL: ${{j.sl}}\\nTP: ${{j.tp}}\\n\\nRefreshing...`);
-    setTimeout(() => location.reload(), 1000);
+    if (j.error) {{ alert('❌ Error: ' + j.error); return; }}
+    alert(`✅ Test ${{side}} fired!\\nEntry: ${{Number(j.price).toLocaleString()}}\\nSL: ${{j.sl}}\\nTP: ${{j.tp}}\\n\\n${{isLive ? "Check Delta Exchange for the 3 orders (entry + SL + TP)!" : "Paper fill simulated."}}\\n\\nRefreshing...`);
+    setTimeout(() => location.reload(), 2000);
   }}
   async function testClose() {{
     if (!confirm('Close current open trade at live price?')) return;
