@@ -373,19 +373,30 @@ def _delete(path: str):
 # ════════════════════════════════════════════════════════════════════════
 # PRICE FEED  (public REST — fallback when WebSocket mark_price unavailable)
 # ════════════════════════════════════════════════════════════════════════
+_MARK_PRICE_MAX_AGE = 15.0   # seconds — beyond this, WS mark price is considered stale
+
 def fetch_price() -> Optional[float]:
-    # Prefer WebSocket mark price (already in feed) — fall back to REST
-    if feed.mark_price and feed.mark_price > 0:
+    # Use WebSocket mark price only if it was updated within the last 15 seconds.
+    # If stale (or never set), fall back to REST ticker to avoid using frozen price.
+    ws_age = (time.time() - feed.mark_price_updated_at) if feed.mark_price_updated_at else 9999
+    if feed.mark_price and feed.mark_price > 0 and ws_age < _MARK_PRICE_MAX_AGE:
         return feed.mark_price
+    # REST fallback
     try:
-        r    = requests.get(f"{BASE_URL}/v2/tickers/{SYMBOL}", timeout=5)
-        data = r.json()
+        r     = requests.get(f"{BASE_URL}/v2/tickers/{SYMBOL}", timeout=5)
+        data  = r.json()
         price = (data.get("result", {}).get("mark_price")
                  or data.get("result", {}).get("close"))
-        return float(price) if price else None
+        if price:
+            # Keep feed in sync with REST value so dashboard stays accurate
+            feed.mark_price            = float(price)
+            feed.mark_price_updated_at = time.time()
+            return float(price)
+        return None
     except Exception as e:
         _loge(f"fetch_price error: {e}")
-        return None
+        # Last-resort: return stale WS value rather than None
+        return feed.mark_price if feed.mark_price else None
 
 # ════════════════════════════════════════════════════════════════════════
 # TELEGRAM

@@ -95,6 +95,7 @@ class CandleFeed:
         self.symbol      = symbol
         self.buffer:     deque = deque(maxlen=buffer_size)
         self.mark_price: Optional[float] = None
+        self.mark_price_updated_at: Optional[float] = None   # time.time() of last mark_price WS update
         self.last_closed: Optional[Candle] = None
         self.connected:  bool = False
 
@@ -410,7 +411,8 @@ class CandleFeed:
             data  = msg.get("data", msg)
             price = data.get("mark_price", data.get("price", data.get("close", None)))
             if price:
-                self.mark_price = float(price)
+                self.mark_price            = float(price)
+                self.mark_price_updated_at = time.time()
         except Exception as e:
             self.log.debug(f"[FEED] mark_price error: {e}")
 
