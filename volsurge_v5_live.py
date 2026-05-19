@@ -465,18 +465,18 @@ def place_market_order(side: str, size: float, reduce_only: bool = False,
 
 def place_sl_order(close_side: str, size: float, sl_price: float,
                    contracts: Optional[int] = None) -> Optional[dict]:
-    sz   = contracts if contracts else _btc_to_contracts(size)
-    body = {
-        "product_id": PRODUCT_ID, "size": sz,
-        "side": close_side.lower(), "order_type": "stop_market_order",
-        "stop_price": str(round(sl_price, 1)),
-        "reduce_only": True, "time_in_force": "gtc",
-    }
-    resp = _post("/v2/orders", body)
-    if resp and resp.get("result", {}).get("id"):
-        return {"order_id": str(resp["result"]["id"]), "placed_time": time.time()}
-    _loge(f"SL order failed: {resp}")
-    return None
+    """
+    Delta Exchange India /v2/orders only accepts limit_order and market_order.
+    stop_market_order is rejected with bad_schema error.
+    SL is therefore enforced by the software position monitor (_position_monitor).
+    This function is a no-op for LIVE mode — returns a sentinel so the rest of
+    the code can still log sl_price correctly without crashing.
+    Returns None (no exchange-side SL order placed).
+    """
+    log.info(f"[SL] Software SL armed @ {sl_price:.1f} — "
+             f"Delta India does not support stop_market_order. "
+             f"Position monitor will fire market close if price breaches SL.")
+    return None  # no exchange order — software monitor handles it
 
 def place_tp_order(close_side: str, size: float, tp_price: float,
                    contracts: Optional[int] = None) -> Optional[dict]:
@@ -902,11 +902,50 @@ def _position_monitor():
                     break
 
             else:
-                # LIVE: detect position flat
+                # ── LIVE monitor ──────────────────────────────────────────────
+                # Delta Exchange India /v2/orders only accepts limit_order and
+                # market_order — stop_market_order is rejected with bad_schema.
+                # Therefore SL is enforced here in software every 2s tick.
+                # TP is still an exchange limit order (works fine).
+
+                # 1. Software SL check — fire market close if price breaches SL
+                hit_sl = (d == "BUY" and price <= sl) or (d == "SELL" and price >= sl)
+                if hit_sl:
+                    _logw(f"[MON] SOFTWARE SL HIT | price={price} sl={sl} d={d}")
+                    _log_lifecycle(open_trade["trade_id"], "SL_SOFTWARE_TRIGGERED",
+                                   price=price, notes=f"sl_level={sl}")
+                    tg(f"🛑 <b>SL HIT (software)</b> [{d}]\n"
+                       f"Price: {price:,.1f} | SL: {sl:,.1f}\n"
+                       f"Placing market close...")
+
+                    # Cancel the outstanding TP order
+                    tp_oid = open_trade.get("tp_oid")
+                    if tp_oid:
+                        _delete(f"/v2/orders/{tp_oid}")
+                        _log(f"[MON] TP order {tp_oid} cancelled on SL trigger")
+
+                    # Place market close (reduce-only)
+                    close_side = "sell" if d == "BUY" else "buy"
+                    close_result = place_market_order(close_side, LOT_SIZE,
+                                                      reduce_only=True, ref_price=price)
+                    if close_result:
+                        exit_px = round(float(close_result.get("fill_price") or price), 1)
+                    else:
+                        _loge("[MON] SL market close order FAILED — retrying once")
+                        time.sleep(0.5)
+                        close_result2 = place_market_order(close_side, LOT_SIZE,
+                                                           reduce_only=True, ref_price=price)
+                        exit_px = round(float((close_result2 or {}).get("fill_price") or price), 1)
+
+                    slip = round(abs(exit_px - sl), 2)
+                    open_trade["exit_order_id"]     = (close_result or {}).get("order_id")
+                    open_trade["exit_fill_px_delta"] = exit_px
+                    _close_trade(exit_px, "SL_SOFTWARE", slip)
+                    break
+
+                # 2. TP / flat detection — check if exchange closed the position
                 pos = get_open_position()
                 if pos is _POS_API_ERROR:
-                    # API call failed — could be a network blip. DO NOT treat as flat.
-                    # Just skip this tick; we'll check again on the next cycle.
                     _logw("[MON] get_open_position API error — skip tick, not treating as flat")
                     continue
                 if pos is None:
@@ -917,33 +956,33 @@ def _position_monitor():
                     exit_order_id = None
                     exit_label    = "AUTO_EXIT"
 
-                    for oid_key, label in [("tp_oid", "TP_LIVE"), ("sl_oid", "SL_LIVE")]:
-                        oid = open_trade.get(oid_key)
-                        if not oid:
-                            continue
-                        order_resp = _get(f"/v2/orders/{oid}")
+                    # Check if TP limit order was filled
+                    tp_oid = open_trade.get("tp_oid")
+                    if tp_oid:
+                        order_resp = _get(f"/v2/orders/{tp_oid}")
                         if order_resp:
                             result_data = order_resp.get("result", {})
                             if result_data.get("state") in ("filled", "closed"):
                                 raw_fill = result_data.get("average_fill_price")
                                 if raw_fill:
                                     exit_fill_px  = float(raw_fill)
-                                    exit_order_id = oid
-                                    exit_label    = label
-                                    _log(f"[LIVE] {label} confirmed oid={oid} fill={exit_fill_px}")
+                                    exit_order_id = tp_oid
+                                    exit_label    = "TP_LIVE"
+                                    _log(f"[LIVE] TP confirmed oid={tp_oid} fill={exit_fill_px}")
                                     _log_lifecycle(open_trade["trade_id"], "EXIT_CONFIRMED",
-                                                   order_id=oid, price=exit_fill_px, notes=label)
-                                    break
+                                                   order_id=tp_oid, price=exit_fill_px, notes="TP_LIVE")
 
                     open_trade["exit_order_id"]      = exit_order_id
                     open_trade["exit_fill_px_delta"]  = exit_fill_px
 
+                    # Cancel any remaining orders
                     for oid_key in ("sl_oid", "tp_oid"):
                         oid = open_trade.get(oid_key)
                         if oid and oid != exit_order_id:
                             _delete(f"/v2/orders/{oid}")
                             _log_lifecycle(open_trade["trade_id"],
-                                           f"{oid_key.upper().replace('_OID','')}_CANCELLED", order_id=oid)
+                                           f"{oid_key.upper().replace('_OID','')}_CANCELLED",
+                                           order_id=oid)
 
                     _close_trade(exit_fill_px, exit_label, 0.0)
                     break
@@ -1700,7 +1739,15 @@ async def dashboard():
     </div>
     <div><div style="color:#6b7280;font-size:10px;text-transform:uppercase;">Signal Latency</div><div style="color:#60a5fa;font-size:14px;">{float(sig_lat or 0):.0f}ms</div></div>
     <div><div style="color:#6b7280;font-size:10px;text-transform:uppercase;">Entry Latency</div><div style="color:#60a5fa;font-size:14px;">{float(en_l or 0):.0f}ms</div></div>
-    <div><div style="color:#6b7280;font-size:10px;text-transform:uppercase;">SL / TP Order</div><div style="color:#6b7280;font-size:11px;font-family:monospace;">{str(sl_oid)[:8] if sl_oid else '—'} / {str(tp_oid)[:8] if tp_oid else '—'}</div></div>
+    <div>
+      <div style="color:#6b7280;font-size:10px;text-transform:uppercase;">SL / TP Order</div>
+      <div style="color:#6b7280;font-size:11px;font-family:monospace;">
+        <span style="color:#facc15;" title="Software SL — monitored every 2s">{str(sl_oid)[:8] if sl_oid else 'SW⚡'}</span>
+        &nbsp;/&nbsp;
+        <span>{str(tp_oid)[:8] if tp_oid else '—'}</span>
+      </div>
+      {"<div style='color:#facc15;font-size:9px;margin-top:2px;'>SW = software SL (2s monitor)</div>" if not sl_oid else ""}
+    </div>
   </div>
 </div>"""
 
