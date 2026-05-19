@@ -652,7 +652,10 @@ def _set_open_trade(
     entry_latency_ms  = round((entry_fill_time - signal_recv_time) * 1000, 1)
 
     _ratio = round(abs(entry_slippage) / sl_dist, 3) if sl_dist > 0 else 0.0
-    _grade = _structure_grade(_ratio)
+    # Test-fire trades (trade_id starts with TEST_) always show inflated slippage because
+    # pine_entry_px is captured at button-click time, not at fill time.
+    # Tag them "TEST" so they don't pollute the structure-grade stats.
+    _grade = "TEST" if trade_id.startswith("TEST_") else _structure_grade(_ratio)
     _slip_pct = round(abs(entry_slippage) / fill_price * 100, 4) if fill_price else 0.0
 
     open_trade = {
@@ -1567,7 +1570,7 @@ async def dashboard():
         return f'<span style="color:#6b7280;">{v or "—"}</span>'
 
     def _grade(v):
-        c = {"INTACT":"#4ade80","MILD":"#facc15","DEGRADED":"#fb923c","BROKEN":"#f87171","CRITICAL":"#dc2626"}.get(v,"#6b7280")
+        c = {"INTACT":"#4ade80","MILD":"#facc15","DEGRADED":"#fb923c","BROKEN":"#f87171","CRITICAL":"#dc2626","TEST":"#60a5fa"}.get(v,"#6b7280")
         return f'<span style="color:{c};font-weight:600;font-size:11px;">{v or "—"}</span>'
 
     def _exit_type(v):
@@ -1607,29 +1610,31 @@ async def dashboard():
         except: pass
     avg_el = round(sum(el_list)/len(el_list), 1) if el_list else 0
 
-    buy_trades  = [t for t in trades if t.get("direction") == "BUY"]
-    sell_trades = [t for t in trades if t.get("direction") == "SELL"]
+    # Exclude TEST_ trades from all stats — they have artificial slippage
+    real_trades = [t for t in trades if not str(t.get("trade_id","")).startswith("TEST_")]
+    buy_trades  = [t for t in real_trades if t.get("direction") == "BUY"]
+    sell_trades = [t for t in real_trades if t.get("direction") == "SELL"]
     buy_wr  = f"{round(sum(1 for t in buy_trades  if t.get('python_actual_outcome')=='TP')/len(buy_trades)*100)}%"  if buy_trades  else "—"
     sell_wr = f"{round(sum(1 for t in sell_trades if t.get('python_actual_outcome')=='TP')/len(sell_trades)*100)}%" if sell_trades else "—"
 
-    tp_pts_l = [float(t["pts"]) for t in trades if t.get("python_actual_outcome")=="TP" and t.get("pts")]
-    sl_pts_l = [float(t["pts"]) for t in trades if t.get("python_actual_outcome")=="SL" and t.get("pts")]
+    tp_pts_l = [float(t["pts"]) for t in real_trades if t.get("python_actual_outcome")=="TP" and t.get("pts")]
+    sl_pts_l = [float(t["pts"]) for t in real_trades if t.get("python_actual_outcome")=="SL" and t.get("pts")]
     avg_tp_pts = round(sum(tp_pts_l)/len(tp_pts_l), 1) if tp_pts_l else 0
     avg_sl_pts = round(sum(sl_pts_l)/len(sl_pts_l), 1) if sl_pts_l else 0
 
-    grade_order  = ["INTACT","MILD","DEGRADED","BROKEN","CRITICAL"]
+    grade_order  = ["INTACT","MILD","DEGRADED","BROKEN","CRITICAL","TEST"]
     grade_counts = {}
     grade_wr     = {}
-    for t in trades:
+    for t in real_trades:
         g = t.get("structure_grade","")
         if g: grade_counts[g] = grade_counts.get(g, 0) + 1
     for g in grade_order:
-        g_trades = [t for t in trades if t.get("structure_grade") == g]
+        g_trades = [t for t in real_trades if t.get("structure_grade") == g]
         g_tp = sum(1 for t in g_trades if t.get("python_actual_outcome") == "TP")
         if g_trades:
             grade_wr[g] = (len(g_trades), g_tp, round(g_tp/len(g_trades)*100))
 
-    clean_trades = [t for t in trades if t.get("structure_grade") in ("INTACT","MILD","")]
+    clean_trades = [t for t in real_trades if t.get("structure_grade") in ("INTACT","MILD","")]
     clean_tp  = sum(1 for t in clean_trades if t.get("python_actual_outcome") == "TP")
     clean_wr  = f"{round(clean_tp/len(clean_trades)*100)}%" if clean_trades else "—"
 
@@ -1647,7 +1652,7 @@ async def dashboard():
         sl_oid   = ot.get("sl_oid","—")
         tp_oid   = ot.get("tp_oid","—")
         en_oid   = ot.get("entry_order_id","—")
-        grade_col = {"INTACT":"#4ade80","MILD":"#facc15","DEGRADED":"#fb923c","BROKEN":"#f87171","CRITICAL":"#dc2626"}.get(grade_v,"#9ca3af")
+        grade_col = {"INTACT":"#4ade80","MILD":"#facc15","DEGRADED":"#fb923c","BROKEN":"#f87171","CRITICAL":"#dc2626","TEST":"#60a5fa"}.get(grade_v,"#9ca3af")
         dir_col   = "#4ade80" if d == "BUY" else "#f87171"
         elapsed   = round(time.time() - ot.get("entry_fill_time", time.time()))
         elapsed_s = f"{elapsed//60}m {elapsed%60}s" if elapsed >= 60 else f"{elapsed}s"
@@ -1669,8 +1674,16 @@ async def dashboard():
     <div><div style="color:#6b7280;font-size:10px;text-transform:uppercase;">TP Level</div><div style="color:#4ade80;font-size:16px;">{_f(tp_px)}</div></div>
     <div><div style="color:#6b7280;font-size:10px;text-transform:uppercase;">Dist to SL</div><div style="color:#f87171;font-size:14px;">{round(abs(live_px-sl_px),1) if live_px else '—'} pts</div></div>
     <div><div style="color:#6b7280;font-size:10px;text-transform:uppercase;">Dist to TP</div><div style="color:#4ade80;font-size:14px;">{round(abs(tp_px-live_px),1) if live_px else '—'} pts</div></div>
-    <div><div style="color:#6b7280;font-size:10px;text-transform:uppercase;">Entry Slippage</div><div style="color:#facc15;font-size:16px;">{'+' if float(slip or 0)>=0 else ''}{float(slip or 0):.2f} pts</div></div>
-    <div><div style="color:#6b7280;font-size:10px;text-transform:uppercase;">Structure Grade</div><div style="color:{grade_col};font-size:16px;font-weight:700;">{grade_v}</div></div>
+    <div>
+      <div style="color:#6b7280;font-size:10px;text-transform:uppercase;">Entry Slippage</div>
+      <div style="color:#facc15;font-size:16px;">{'+' if float(slip or 0)>=0 else ''}{float(slip or 0):.2f} pts</div>
+      {"<div style='color:#60a5fa;font-size:9px;margin-top:2px;'>test — not real signal</div>" if ot.get("trade_id","").startswith("TEST_") else ""}
+    </div>
+    <div>
+      <div style="color:#6b7280;font-size:10px;text-transform:uppercase;">Structure Grade</div>
+      <div style="color:{grade_col};font-size:16px;font-weight:700;">{grade_v}</div>
+      {"<div style='color:#60a5fa;font-size:9px;margin-top:2px;'>test trade — ignore grade</div>" if grade_v == "TEST" else ""}
+    </div>
     <div><div style="color:#6b7280;font-size:10px;text-transform:uppercase;">Signal Latency</div><div style="color:#60a5fa;font-size:14px;">{float(sig_lat or 0):.0f}ms</div></div>
     <div><div style="color:#6b7280;font-size:10px;text-transform:uppercase;">Entry Latency</div><div style="color:#60a5fa;font-size:14px;">{float(en_l or 0):.0f}ms</div></div>
     <div><div style="color:#6b7280;font-size:10px;text-transform:uppercase;">SL / TP Order</div><div style="color:#6b7280;font-size:11px;font-family:monospace;">{str(sl_oid)[:8] if sl_oid else '—'} / {str(tp_oid)[:8] if tp_oid else '—'}</div></div>
@@ -1684,7 +1697,7 @@ async def dashboard():
         pct = round(cnt/total*100) if total else 0
         wr_data = grade_wr.get(g)
         wr_str  = f"{wr_data[2]}%" if wr_data else "—"
-        col = {"INTACT":"#4ade80","MILD":"#facc15","DEGRADED":"#fb923c","BROKEN":"#f87171","CRITICAL":"#dc2626"}.get(g,"#6b7280")
+        col = {"INTACT":"#4ade80","MILD":"#facc15","DEGRADED":"#fb923c","BROKEN":"#f87171","CRITICAL":"#dc2626","TEST":"#60a5fa"}.get(g,"#6b7280")
         bar = "█" * min(pct, 30)
         grade_rows += f"""<tr>
           <td style="color:{col};font-weight:600;">{g}</td>
