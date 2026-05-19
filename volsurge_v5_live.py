@@ -1329,6 +1329,58 @@ async def preflight():
     return JSONResponse(pf)
 
 
+# ── /test/fire/{side} ────────────────────────────────────────────────────────
+@app.get("/test/fire/{side}")
+async def test_fire(side: str):
+    """Inject a fake BUY or SELL signal — PAPER MODE only."""
+    if not PAPER_MODE:
+        return JSONResponse({"error": "Test fire only allowed in PAPER mode"}, status_code=403)
+    side = side.upper()
+    if side not in ("BUY", "SELL"):
+        raise HTTPException(400, "Use /test/fire/buy or /test/fire/sell")
+    with _state_lock:
+        if open_trade:
+            return JSONResponse({"error": "Already in trade — close it first with /test/close"}, status_code=400)
+    price   = fetch_price() or 77000.0
+    sl_dist = 200.0
+    tp_dist = round(sl_dist * TP_R, 1)
+    pine_sl = round(price - sl_dist if side == "BUY" else price + sl_dist, 1)
+    pine_tp = round(price + tp_dist if side == "BUY" else price - tp_dist, 1)
+    log.info(f"[TEST] Injecting fake {side} @ {price} sl={pine_sl} tp={pine_tp}")
+    threading.Thread(
+        target=_process_entry,
+        kwargs=dict(
+            signal=side, pine_entry_px=price, pine_sl=pine_sl, pine_tp=pine_tp,
+            sl_dist=sl_dist, sig_ts=int(time.time()),
+            chop_avg_tr=150.0, burst_threshold=300.0, candle_body=350.0, atr5_prev=111.0,
+        ),
+        daemon=True, name="test-entry"
+    ).start()
+    return JSONResponse({"test": "fired", "side": side, "price": price,
+                         "sl": pine_sl, "tp": pine_tp, "sl_dist": sl_dist})
+
+
+# ── /test/close ───────────────────────────────────────────────────────────────
+@app.get("/test/close")
+async def test_close():
+    """Force-close current open trade at live price — PAPER MODE only."""
+    if not PAPER_MODE:
+        return JSONResponse({"error": "Test close only allowed in PAPER mode"}, status_code=403)
+    with _state_lock:
+        if not open_trade:
+            return JSONResponse({"error": "No open trade to close"}, status_code=400)
+        price = fetch_price() or float(open_trade.get("fill_price", 0))
+        _close_trade(price, "TEST_CLOSE", 0.0)
+    return JSONResponse({"test": "closed", "exit_price": price})
+
+
+# ── /test/telegram ────────────────────────────────────────────────────────────
+@app.get("/test/telegram")
+async def test_telegram():
+    tg("✅ Vol Surge v5 Telegram test — connection OK")
+    return JSONResponse({"status": "sent"})
+
+
 # ── /dashboard ────────────────────────────────────────────────────────────────
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard():
@@ -1832,11 +1884,42 @@ async def dashboard():
 
 {_persist_warn}
 
-<div style="padding:4px 24px 0;font-size:11px;color:#6b7280;">
-  📊 Closed trades: <b style="color:#e2e8f0">{len(trades)}</b>
-  &nbsp;|&nbsp; Data path: <code style="color:#60a5fa">{DATA_DIR}</code>
-  &nbsp;|&nbsp; Signal source: <span style="color:#4ade80">⚡ WebSocket-native (&lt;100ms)</span>
+<div style="padding:8px 24px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+  <div style="font-size:11px;color:#6b7280;">
+    📊 Closed trades: <b style="color:#e2e8f0">{len(trades)}</b>
+    &nbsp;|&nbsp; Data: <code style="color:#60a5fa">{DATA_DIR}</code>
+    &nbsp;|&nbsp; <span style="color:#4ade80">⚡ WebSocket-native (&lt;100ms)</span>
+  </div>
+  {'<div style="display:flex;gap:8px;align-items:center;">' if PAPER_MODE else ''}
+  {'<span style="color:#6b7280;font-size:11px;">🧪 Paper test:</span>' if PAPER_MODE else ''}
+  {'<button onclick="testFire(\'BUY\')"  style="background:#14532d;color:#4ade80;border:1px solid #166534;border-radius:5px;padding:4px 12px;font-size:11px;cursor:pointer;">▲ Test BUY</button>' if PAPER_MODE else ''}
+  {'<button onclick="testFire(\'SELL\')" style="background:#450a0a;color:#f87171;border:1px solid #7f1d1d;border-radius:5px;padding:4px 12px;font-size:11px;cursor:pointer;">▼ Test SELL</button>' if PAPER_MODE else ''}
+  {'<button onclick="testClose()"        style="background:#1e293b;color:#9ca3af;border:1px solid #334155;border-radius:5px;padding:4px 12px;font-size:11px;cursor:pointer;">✖ Close Trade</button>' if PAPER_MODE else ''}
+  {'<button onclick="testTelegram()"     style="background:#1e293b;color:#60a5fa;border:1px solid #1e40af;border-radius:5px;padding:4px 12px;font-size:11px;cursor:pointer;">📨 Test TG</button>' if PAPER_MODE else ''}
+  {'</div>' if PAPER_MODE else ''}
 </div>
+
+<script>
+  async function testFire(side) {{
+    const r = await fetch(`/test/fire/${{side.toLowerCase()}}`);
+    const j = await r.json();
+    if (j.error) {{ alert('Error: ' + j.error); return; }}
+    alert(`✅ Test ${{side}} fired!\\nEntry: ${{j.price?.toLocaleString()}}\\nSL: ${{j.sl}}\\nTP: ${{j.tp}}\\n\\nRefreshing...`);
+    setTimeout(() => location.reload(), 1000);
+  }}
+  async function testClose() {{
+    if (!confirm('Close current open trade at live price?')) return;
+    const r = await fetch('/test/close');
+    const j = await r.json();
+    alert(j.error ? 'Error: ' + j.error : `✅ Trade closed @ ${{j.exit_price?.toLocaleString()}}\\nRefreshing...`);
+    setTimeout(() => location.reload(), 1000);
+  }}
+  async function testTelegram() {{
+    const r = await fetch('/test/telegram');
+    const j = await r.json();
+    alert(j.status === 'sent' ? '✅ Telegram message sent!' : 'Error: ' + JSON.stringify(j));
+  }}
+</script>
 
 <!-- OPEN TRADE PANEL -->
 {open_panel}
