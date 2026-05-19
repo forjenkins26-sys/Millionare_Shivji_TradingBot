@@ -1352,26 +1352,49 @@ async def test_fire(side: str, confirm: str = ""):
     tp_dist = round(sl_dist * TP_R, 1)
     pine_sl = round(price - sl_dist if side == "BUY" else price + sl_dist, 1)
     pine_tp = round(price + tp_dist if side == "BUY" else price - tp_dist, 1)
-    log.info(f"[TEST] Injecting fake {side} @ {price} sl={pine_sl} tp={pine_tp}")
+    now       = time.time()
+    trade_id  = f"TEST_{side[0]}{int(now*1000)}"
+    log.info(f"[TEST] Injecting fake {side} @ {price} sl={pine_sl} tp={pine_tp} trade_id={trade_id}")
+    with _state_lock:
+        global _entry_processing
+        _entry_processing = True
     threading.Thread(
         target=_process_entry,
         kwargs=dict(
-            signal=side, pine_entry_px=price, pine_sl=pine_sl, pine_tp=pine_tp,
-            sl_dist=sl_dist, sig_ts=int(time.time()),
-            chop_avg_tr=150.0, burst_threshold=300.0, candle_body=350.0, atr5_prev=111.0,
+            signal=side,
+            pine_entry_px=price,
+            pine_sl=pine_sl,
+            pine_tp=pine_tp,
+            sl_dist=sl_dist,
+            pine_signal_time=int(now * 1000),   # ms
+            recv_time=now,
+            trade_id=trade_id,
+            signal_timeframe="15",
+            signal_tf_bar_time=int(now),
+            chop_avg_tr=150.0,
+            burst_threshold=300.0,
+            candle_body=350.0,
+            atr5_prev=111.0,
         ),
         daemon=True, name="test-entry"
     ).start()
     return JSONResponse({"test": "fired", "side": side, "price": price,
-                         "sl": pine_sl, "tp": pine_tp, "sl_dist": sl_dist})
+                         "sl": pine_sl, "tp": pine_tp, "sl_dist": sl_dist,
+                         "trade_id": trade_id})
 
 
 # ── /test/close ───────────────────────────────────────────────────────────────
 @app.get("/test/close")
-async def test_close():
-    """Force-close current open trade at live price — PAPER MODE only."""
-    if not PAPER_MODE:
-        return JSONResponse({"error": "Test close only allowed in PAPER mode"}, status_code=403)
+async def test_close(confirm: str = ""):
+    """Force-close current open trade at live price.
+    PAPER mode: fires freely.
+    LIVE mode: requires ?confirm=yes to cancel SL/TP orders and close position on Delta."""
+    if not PAPER_MODE and confirm.lower() != "yes":
+        return JSONResponse({
+            "error": "LIVE mode — add ?confirm=yes to cancel orders and close position on Delta",
+            "warning": "This will cancel your SL/TP orders and close the open position",
+            "retry_url": "/test/close?confirm=yes"
+        }, status_code=403)
     with _state_lock:
         if not open_trade:
             return JSONResponse({"error": "No open trade to close"}, status_code=400)
@@ -1920,10 +1943,16 @@ async def dashboard():
     setTimeout(() => location.reload(), 2000);
   }}
   async function testClose() {{
-    if (!confirm('Close current open trade at live price?')) return;
-    const r = await fetch('/test/close');
+    const isLiveClose = '{'' if PAPER_MODE else 'LIVE'}' === 'LIVE';
+    const msg = isLiveClose
+      ? 'LIVE MODE: This will cancel your SL/TP orders and close the position on Delta Exchange.\\nContinue?'
+      : 'Close current open trade at live price?';
+    if (!confirm(msg)) return;
+    const url = isLiveClose ? '/test/close?confirm=yes' : '/test/close';
+    const r = await fetch(url);
     const j = await r.json();
-    alert(j.error ? 'Error: ' + j.error : `✅ Trade closed @ ${{j.exit_price?.toLocaleString()}}\\nRefreshing...`);
+    if (j.error) {{ alert('❌ Error: ' + j.error); return; }}
+    alert(`✅ Trade closed @ ${{j.exit_price?.toLocaleString()}}\\n${{isLiveClose ? "Delta orders cancelled." : ""}}\\nRefreshing...`);
     setTimeout(() => location.reload(), 1000);
   }}
   async function testTelegram() {{
