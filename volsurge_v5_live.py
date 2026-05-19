@@ -1692,6 +1692,108 @@ async def dashboard():
   setInterval(()=>{{document.getElementById('clk').textContent=new Date().toLocaleTimeString('en-IN',{{timeZone:'Asia/Kolkata'}})}},1000);
   window.onload=()=>document.getElementById('clk').textContent=new Date().toLocaleTimeString('en-IN',{{timeZone:'Asia/Kolkata'}});
 
+  // ── Alert system ─────────────────────────────────────────────────────
+  const CURRENT_IN_TRADE  = {'true' if ot else 'false'};
+  const CURRENT_DIRECTION = '{ot.get("direction","") if ot else ""}';
+  const CURRENT_FILL      = '{ot.get("fill_price","") if ot else ""}';
+  const CURRENT_SL        = '{ot.get("sl_price","") if ot else ""}';
+  const CURRENT_TP        = '{ot.get("tp_price","") if ot else ""}';
+
+  function playSignalSound() {{
+    try {{
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      [[880,0],[1100,0.25],[880,0.5],[1100,0.75],[1320,1.0]].forEach(([freq,t]) => {{
+        const o = ctx.createOscillator(), g = ctx.createGain();
+        o.connect(g); g.connect(ctx.destination);
+        o.type = 'sine'; o.frequency.value = freq;
+        g.gain.setValueAtTime(0.4, ctx.currentTime + t);
+        g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + t + 0.2);
+        o.start(ctx.currentTime + t);
+        o.stop(ctx.currentTime + t + 0.25);
+      }});
+    }} catch(e) {{ console.log('Audio error:', e); }}
+  }}
+
+  function playExitSound(isTP) {{
+    try {{
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const freqs = isTP ? [[1320,0],[1100,0.2],[880,0.4]] : [[440,0],[330,0.2],[220,0.4]];
+      freqs.forEach(([freq,t]) => {{
+        const o = ctx.createOscillator(), g = ctx.createGain();
+        o.connect(g); g.connect(ctx.destination);
+        o.type = 'sine'; o.frequency.value = freq;
+        g.gain.setValueAtTime(0.4, ctx.currentTime + t);
+        g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + t + 0.25);
+        o.start(ctx.currentTime + t);
+        o.stop(ctx.currentTime + t + 0.3);
+      }});
+    }} catch(e) {{}}
+  }}
+
+  function sendNotification(title, body) {{
+    if (!('Notification' in window)) return;
+    if (Notification.permission === 'granted') {{
+      new Notification(title, {{ body: body, icon: 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">⚡</text></svg>' }});
+    }}
+  }}
+
+  function enableAlerts() {{
+    if (!('Notification' in window)) {{ alert('Notifications not supported'); return; }}
+    Notification.requestPermission().then(p => {{
+      const btn = document.getElementById('alert-btn');
+      if (p === 'granted') {{
+        btn.textContent = '🔔 Alerts ON';
+        btn.style.background = '#14532d';
+        btn.style.color = '#4ade80';
+        btn.style.borderColor = '#166534';
+        localStorage.setItem('vs_alerts', '1');
+        playSignalSound();
+        sendNotification('✅ Vol Surge Alerts ON', 'You will be notified when a signal fires');
+      }} else {{
+        btn.textContent = '🔕 Alerts OFF';
+        localStorage.setItem('vs_alerts', '0');
+      }}
+    }});
+  }}
+
+  window.addEventListener('load', () => {{
+    // Restore alert button state
+    const btn = document.getElementById('alert-btn');
+    if (localStorage.getItem('vs_alerts') === '1' && Notification.permission === 'granted') {{
+      btn.textContent = '🔔 Alerts ON';
+      btn.style.background = '#14532d';
+      btn.style.color = '#4ade80';
+      btn.style.borderColor = '#166534';
+    }}
+
+    const alertsEnabled = localStorage.getItem('vs_alerts') === '1' && Notification.permission === 'granted';
+    const prevInTrade   = localStorage.getItem('vs_in_trade') === 'true';
+    const prevTradeDir  = localStorage.getItem('vs_trade_dir') || '';
+
+    // New entry detected
+    if (alertsEnabled && CURRENT_IN_TRADE && !prevInTrade) {{
+      playSignalSound();
+      sendNotification(
+        `🔥 Vol Surge ${{CURRENT_DIRECTION}} SIGNAL`,
+        `Entry: ${{CURRENT_FILL}} | SL: ${{CURRENT_SL}} | TP: ${{CURRENT_TP}}`
+      );
+      // Flash header
+      document.body.style.boxShadow = 'inset 0 0 60px rgba(74,222,128,0.3)';
+      setTimeout(() => document.body.style.boxShadow = '', 3000);
+    }}
+
+    // Exit detected (was in trade, now idle)
+    if (alertsEnabled && !CURRENT_IN_TRADE && prevInTrade) {{
+      // We don't know TP/SL here precisely, just play generic exit
+      playExitSound(false);
+      sendNotification('📊 Vol Surge Trade Closed', `Previous ${{prevTradeDir}} trade exited`);
+    }}
+
+    // Save current state for next refresh
+    localStorage.setItem('vs_in_trade', CURRENT_IN_TRADE);
+    localStorage.setItem('vs_trade_dir', CURRENT_DIRECTION);
+  }});
+
   function switchView(mode) {{
     const det = document.getElementById('view-detailed');
     const tv  = document.getElementById('view-tv');
@@ -1722,6 +1824,7 @@ async def dashboard():
   <div style="text-align:right;display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
     <span style="background:{mode_bg};color:{mode_col};padding:4px 14px;border-radius:20px;font-size:12px;font-weight:700;">{mode_label}</span>
     <span style="color:#6b7280;font-size:11px;">🕐 IST <b id="clk"></b></span>
+    <button id="alert-btn" class="toggle-btn" onclick="enableAlerts()" style="font-size:11px;padding:4px 12px;">🔕 Enable Alerts</button>
     <span style="color:#{'4ade80' if ot else '6b7280'};font-size:11px;">{'🔴 POSITION OPEN' if ot else '⚪ IDLE'}</span>
     <span style="color:#{'4ade80' if _DATA_PERSISTENT else 'f59e0b'};font-size:10px;">{'💾 Data Persistent' if _DATA_PERSISTENT else '⚠️ Data Ephemeral'}</span>
   </div>
