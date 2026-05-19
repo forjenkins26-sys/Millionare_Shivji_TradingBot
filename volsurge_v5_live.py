@@ -1423,10 +1423,11 @@ async def preflight():
 
 # ── /test/fire/{side} ────────────────────────────────────────────────────────
 @app.get("/test/fire/{side}")
-async def test_fire(side: str, confirm: str = ""):
+async def test_fire(side: str, confirm: str = "", sl_dist_pts: float = 0):
     """Inject a fake BUY or SELL signal.
     PAPER mode: fires freely.
-    LIVE mode:  requires ?confirm=yes — places REAL orders on Delta Exchange."""
+    LIVE mode:  requires ?confirm=yes — places REAL orders on Delta Exchange.
+    Optional: ?sl_dist_pts=10 to use a tight SL (e.g. 10 pts) for faster SL/TP trigger in tests."""
     side = side.upper()
     if side not in ("BUY", "SELL"):
         raise HTTPException(400, "Use /test/fire/buy or /test/fire/sell")
@@ -1440,7 +1441,7 @@ async def test_fire(side: str, confirm: str = ""):
         if open_trade:
             return JSONResponse({"error": "Already in trade — close it first with /test/close"}, status_code=400)
     price   = fetch_price() or 77000.0
-    sl_dist = round(price * 0.003, 1)  # ~0.3% of price as SL distance
+    sl_dist = round(sl_dist_pts, 1) if sl_dist_pts > 0 else round(price * 0.003, 1)
     tp_dist = round(sl_dist * TP_R, 1)
     pine_sl = round(price - sl_dist if side == "BUY" else price + sl_dist, 1)
     pine_tp = round(price + tp_dist if side == "BUY" else price - tp_dist, 1)
