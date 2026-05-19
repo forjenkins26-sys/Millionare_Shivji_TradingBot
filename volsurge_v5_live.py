@@ -1089,9 +1089,12 @@ def _process_entry(
             tp_oid      = tp_result["order_id"]   if tp_result else None
             tp_placed_t = tp_result["placed_time"] if tp_result else None
 
-            if not sl_oid:
-                _loge("SL ORDER FAILED — CRITICAL: close position manually on Delta")
-                tg(f"🚨 SL FAILED after {d} entry @ {fill_px} — CLOSE MANUALLY ON DELTA")
+            # sl_oid is always None — Delta India does not support stop_market_order.
+            # SL is enforced by the software position monitor (_position_monitor).
+            # No alert needed here — the ENTERED Telegram message already shows SW⚡ SL level.
+            if sl_oid:
+                # Future-proof: if exchange SL ever gets placed, log it
+                _log(f"[SL] Exchange SL order placed oid={sl_oid} @ {sl_price}")
 
             # Write latency CSV immediately (crash-safe)
             try:
