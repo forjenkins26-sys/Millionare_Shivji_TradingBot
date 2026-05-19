@@ -1096,6 +1096,16 @@ def _process_entry(
                 # Future-proof: if exchange SL ever gets placed, log it
                 _log(f"[SL] Exchange SL order placed oid={sl_oid} @ {sl_price}")
 
+            # TP placement failure alert — critical blind spot if TP order never reached Delta.
+            # Trade still runs (software SL protects it), but user must know immediately
+            # so they can manually place TP on Delta or decide to close.
+            if not tp_oid:
+                _loge(f"[TP] TP ORDER FAILED after {d} entry @ {fill_px} — no TP on Delta")
+                tg(f"⚠️ <b>TP ORDER FAILED</b> [{d}]\n"
+                   f"Entry: {fill_px:,.1f} | Expected TP: {tp_price:,.1f}\n"
+                   f"Trade is open — software SL @ {sl_price:,.1f} still active\n"
+                   f"Action: manually place SELL limit @ {tp_price:,.1f} on Delta or close trade")
+
             # Write latency CSV immediately (crash-safe)
             try:
                 _sig_lat = round((recv_time - pine_signal_time / 1000) * 1000, 1) if pine_signal_time else ""
