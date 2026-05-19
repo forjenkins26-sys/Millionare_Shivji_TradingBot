@@ -100,7 +100,7 @@ USE_HA        = os.getenv("USE_HA_CANDLES", "true").lower() == "true"
 TP_R               = float(os.getenv("TP_R", "1.4"))
 MAX_SLIPPAGE_RATIO = float(os.getenv("MAX_SLIPPAGE_RATIO", "0.0"))
 
-PRICE_INTERVAL = 2   # seconds between position monitor ticks
+PRICE_INTERVAL = 1   # seconds between position monitor ticks (1s = ~4pt worst-case SL slippage vs 9pt at 2s)
 POS_MON_DELAY  = 3   # seconds to wait after entry before monitor starts
 
 # ════════════════════════════════════════════════════════════════════════
