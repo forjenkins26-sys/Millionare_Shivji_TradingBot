@@ -767,7 +767,9 @@ def _close_trade(exit_price: float, exit_type: str, exit_slippage: float = 0.0):
     pts       = round((exit_price - entry_px) if d == "BUY" else (entry_px - exit_price), 2)
     pnl_approx = round(pts * LOT_SIZE, 4)
     trade_duration_sec = round(time.time() - trade.get("entry_fill_time", time.time()), 1)
-    python_outcome     = "TP" if "TP" in exit_type else "SL"
+    python_outcome     = ("TP" if "TP" in exit_type
+                          else "TEST" if "TEST" in exit_type
+                          else "SL")
 
     row = {
         "trade_id":              trade["trade_id"],
@@ -1576,8 +1578,9 @@ async def dashboard():
         return "—"
 
     def _outcome(v):
-        if v == "TP": return '<span style="background:#14532d;color:#4ade80;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;">TP ✓</span>'
-        if v == "SL": return '<span style="background:#450a0a;color:#f87171;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;">SL ✗</span>'
+        if v == "TP":   return '<span style="background:#14532d;color:#4ade80;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;">TP ✓</span>'
+        if v == "SL":   return '<span style="background:#450a0a;color:#f87171;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;">SL ✗</span>'
+        if v == "TEST": return '<span style="background:#1e3a5f;color:#60a5fa;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;">TEST</span>'
         return f'<span style="color:#6b7280;">{v or "—"}</span>'
 
     def _grade(v):
@@ -1785,8 +1788,8 @@ async def dashboard():
         try: pnl_val = float(t.get("pnl_approx", 0) or 0)
         except: pass
         lot_val  = t.get("lot_size", LOT_SIZE)
-        status_str = ("TP2 ✓" if outcome=="TP" else "SL ✗" if outcome=="SL" else "—")
-        status_col = "#4ade80" if outcome=="TP" else "#f87171" if outcome=="SL" else "#9ca3af"
+        status_str = ("TP ✓" if outcome=="TP" else "SL ✗" if outcome=="SL" else "TEST" if outcome=="TEST" else "—")
+        status_col = "#4ade80" if outcome=="TP" else "#f87171" if outcome=="SL" else "#60a5fa" if outcome=="TEST" else "#9ca3af"
         pts_col  = "#4ade80" if pts_val >= 0 else "#f87171"
         pnl_col  = "#4ade80" if pnl_val >= 0 else "#f87171"
         tv_rows += f"""
