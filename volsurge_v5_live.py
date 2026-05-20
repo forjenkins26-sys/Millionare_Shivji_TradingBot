@@ -1091,9 +1091,10 @@ def _process_entry(
             fill_px          = result.get("fill_price")
 
             # ── Fill price fallback: fast polling instead of 1.5s sleep ──
+            # First poll at 100ms (not 250ms) — IOC market orders usually settle fast
             if not fill_px:
-                for _poll in range(5):
-                    time.sleep(0.25)
+                for _pw in (0.10, 0.15, 0.20, 0.25, 0.25):
+                    time.sleep(_pw)
                     pos = get_open_position()
                     if pos and pos is not _POS_API_ERROR:
                         fill_px = float(pos.get("entry_price", 0)) or None
@@ -1388,6 +1389,7 @@ async def startup():
     # Start the WebSocket candle feed
     asyncio.create_task(feed.start())
     asyncio.create_task(_feed_watchdog())
+    asyncio.create_task(_http_keepwarm())   # keep Delta REST TCP connection warm between trades
 
     # OOM / hard-crash orphan recovery — detects untracked Delta positions
     # that survived a Railway kill with no SIGTERM (only runs in LIVE mode)
@@ -1583,14 +1585,41 @@ async def _feed_watchdog():
         elif not feed.is_ready:
             log.warning("[WATCHDOG] Feed not ready — buffer thin")
         elif feed.last_closed:
-            # Measure from bar CLOSE (ts + 300), not bar START (ts)
-            # A 5m bar starts 300s before it closes — using ts directly
-            # makes age=5min immediately after close, causing false alarms.
-            age = time.time() - (feed.last_closed.ts + 300)
-            if age > 600:   # warn if no bar has CLOSED in the last 10min (2x 5m bars)
-                log.warning(f"[WATCHDOG] No bar in {age/60:.1f}min — stale feed")
-                tg(f"⚠️ Vol Surge v5: No candle received for {age/60:.1f}min — stale feed")
+            # Measure from bar CLOSE (ts + 900), not bar START (ts)
+            # A 15m bar starts 900s before it closes — using ts directly
+            # makes age=15min immediately after close, causing false alarms.
+            age = time.time() - (feed.last_closed.ts + 900)
+            if age > 1800:   # no bar closed in last 30min (2× 15m bars)
+                # Guard against false alarms at startup:
+                # Delta's REST backfill can lag 10-20min — last_closed may be
+                # old even though the WebSocket is live and receiving frames.
+                # Only alarm if BOTH candle age is stale AND WS frames are silent.
+                _frame_age = (time.time() - feed.last_frame_at) if feed.last_frame_at else 9999
+                if _frame_age > 120:   # WS also silent for 2min → truly stale
+                    log.warning(f"[WATCHDOG] No bar in {age/60:.1f}min, last WS frame {_frame_age:.0f}s ago — stale feed")
+                    tg(f"⚠️ Vol Surge v5: No candle received for {age/60:.1f}min — stale feed")
+                else:
+                    log.debug(f"[WATCHDOG] last_closed age={age/60:.1f}min but WS alive ({_frame_age:.0f}s ago) — mid-bar OK")
         await asyncio.sleep(300)
+
+
+async def _http_keepwarm():
+    """
+    Keep the persistent HTTP session TCP connection warm between trades.
+
+    Without this, if no trade fires for >60s the Delta API TCP connection
+    drops idle and the next ORDER call must re-establish TCP+TLS first
+    (~50-100ms wasted on entry). A lightweight ticker fetch every 45s
+    keeps the connection alive at zero cost.
+    """
+    await asyncio.sleep(20)   # let startup settle first
+    while True:
+        try:
+            _get("/v2/tickers", params={"symbol": SYMBOL})
+            log.debug("[KEEPWARM] HTTP connection refreshed")
+        except Exception:
+            pass
+        await asyncio.sleep(45)   # well under typical 60s server keep-alive timeout
 
 
 @app.head("/health")

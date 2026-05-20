@@ -42,6 +42,8 @@ _BACKOFF_MAX        = 60.0
 _BACKOFF_MULT       = 2.0
 _HEARTBEAT_INTERVAL = 30.0   # seconds between keepalive pings to Delta
 
+CANDLE_SECONDS = 900   # 15-minute bars — used by scheduled close guard
+
 
 # ── Data model ────────────────────────────────────────────────────────────────
 
@@ -386,6 +388,7 @@ class CandleFeed:
             if self._forming is None:
                 self._forming = dict(ts=raw_ts, open=o, high=h, low=l, close=c, volume=v)
                 self.log.debug(f"[FEED] forming ts={raw_ts}")
+                self._schedule_close_guard(raw_ts)   # force-close at bar_ts+900s if WS is slow
                 return
 
             if raw_ts != self._forming["ts"]:
@@ -396,6 +399,7 @@ class CandleFeed:
                            low=f["low"], close=f["close"], volume=f["volume"])
                 )
                 self._forming = dict(ts=raw_ts, open=o, high=h, low=l, close=c, volume=v)
+                self._schedule_close_guard(raw_ts)   # guard for the new forming bar too
             else:
                 # Same bar — update with latest tick
                 self._forming["high"]   = max(self._forming["high"], h)
@@ -432,3 +436,53 @@ class CandleFeed:
                 self._on_close(candle, self.buffer)
             except Exception as e:
                 self.log.error(f"[FEED] on_candle_close callback raised: {e}")
+
+    # ── Scheduled close guard ─────────────────────────────────────────────────
+
+    def _schedule_close_guard(self, bar_ts: int):
+        """
+        Schedule a forced bar-close at exactly bar_ts + CANDLE_SECONDS + 200ms.
+
+        Without this, bar close is only detected when the NEXT bar's first WS
+        tick arrives — which can lag 200ms–30s+ after actual bar end, especially
+        in slow or quiet markets. That delay directly becomes entry slippage.
+
+        The 200ms grace allows the natural WS close to arrive first in busy
+        markets. In slow markets the guard fires and closes at the right time.
+        """
+        try:
+            asyncio.get_running_loop().create_task(
+                self._scheduled_close_guard(bar_ts)
+            )
+        except RuntimeError:
+            pass   # not in asyncio context (e.g. called from backfill) — safe to skip
+
+    async def _scheduled_close_guard(self, bar_ts: int):
+        close_unix = bar_ts + CANDLE_SECONDS
+        delay      = close_unix - time.time() + 0.2   # 200ms grace
+        if delay > 0:
+            await asyncio.sleep(delay)
+
+        # Natural WS close already emitted?
+        if self.last_closed and self.last_closed.ts >= bar_ts:
+            self.log.debug(f"[FEED] ⏰ guard ts={bar_ts}: WS closed naturally — OK")
+            return
+
+        # Force-emit from current forming state
+        if self._forming and self._forming["ts"] == bar_ts:
+            f = self._forming
+            elapsed = round(time.time() - close_unix, 3)
+            self.log.info(
+                f"[FEED] ⏰ FORCED CLOSE ts={bar_ts} "
+                f"(WS next-bar tick not received — guard fired +{elapsed:.3f}s after bar end)"
+            )
+            self._emit_closed(
+                Candle(ts=f["ts"], open=f["open"], high=f["high"],
+                       low=f["low"], close=f["close"], volume=f["volume"])
+            )
+            self._forming = None
+        else:
+            self.log.debug(
+                f"[FEED] ⏰ guard ts={bar_ts}: _forming changed — skip "
+                f"(last_closed={self.last_closed.ts if self.last_closed else None})"
+            )
