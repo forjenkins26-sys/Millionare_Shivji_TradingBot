@@ -60,6 +60,14 @@ grpRisk = "Risk / Journal"
 fixedLot    = input.float(0.1, "Fixed Lot (for P&L)",         minval=0.001, maxval=10,  step=0.001, group=grpRisk)
 startBal    = input.float(500,  "Start Balance ($)",            minval=10,   step=100,              group=grpRisk)
 useCompound = input.bool(true,  "Enable Compound Lots",         group=grpRisk)
+
+// ── Slippage Simulation Journal ──────────────────────────────────────────
+// When ON: journal shows realistic live P&L after slippage cost.
+// Entry shifts by simSlipPts in trade direction, Pts = original Pts - simSlipPts.
+// Wins may flip to losses. Shows true live performance expectation.
+grpSlipSim    = "Slippage Simulation (Live Reality Check)"
+useSlipSim    = input.bool(false, "Slippage Sim ON — show live-adjusted journal", group=grpSlipSim)
+simSlipPts    = input.float(50.0, "Simulated Slippage (pts) — avg live entry cost", minval=1, maxval=500, step=5, group=grpSlipSim)
 maxCompMult = input.float(10,  "Max Compound Multiplier",      minval=1.0,  maxval=10.0, step=0.5,  group=grpRisk)
 
 grpDisp = "Display"
@@ -500,19 +508,22 @@ fmtPx(px) =>
     str.tostring(math.round(px, 1))
 
 if barstate.islast and showJournal
-    _hbg = color.new(#1a1400,0)
-    _hfg = color.new(#ffeb3b,0)
+    _hbg = useSlipSim ? color.new(#1a0a00,0) : color.new(#1a1400,0)
+    _hfg = useSlipSim ? color.new(#ff9800,0) : color.new(#ffeb3b,0)
+    _entHdr = useSlipSim ? "Entry$(sim)" : "Entry $"
+    _ptsHdr = useSlipSim ? "Pts(sim)"    : "Pts"
+    _pnlHdr = useSlipSim ? "Fix(sim)"    : "Fix P&L"
     table.cell(jTbl, 0,  0, "Dir",           text_color=_hfg, text_size=size.small, bgcolor=_hbg)
     table.cell(jTbl, 1,  0, "Date",          text_color=_hfg, text_size=size.small, bgcolor=_hbg)
     table.cell(jTbl, 2,  0, "In",            text_color=_hfg, text_size=size.small, bgcolor=_hbg)
     table.cell(jTbl, 3,  0, "Out",           text_color=_hfg, text_size=size.small, bgcolor=_hbg)
-    table.cell(jTbl, 4,  0, "Entry $",       text_color=_hfg, text_size=size.small, bgcolor=_hbg)
+    table.cell(jTbl, 4,  0, _entHdr,         text_color=_hfg, text_size=size.small, bgcolor=_hbg)
     table.cell(jTbl, 5,  0, "Exit $",        text_color=_hfg, text_size=size.small, bgcolor=_hbg)
     table.cell(jTbl, 6,  0, "SL $",          text_color=color.new(#ff4444,0), text_size=size.small, bgcolor=_hbg)
-    table.cell(jTbl, 7,  0, "Pts",           text_color=_hfg, text_size=size.small, bgcolor=_hbg)
+    table.cell(jTbl, 7,  0, _ptsHdr,         text_color=_hfg, text_size=size.small, bgcolor=_hbg)
     table.cell(jTbl, 8,  0, "Lots",          text_color=_hfg, text_size=size.small, bgcolor=_hbg)
     table.cell(jTbl, 9,  0, "Cmpd P&L",      text_color=_hfg, text_size=size.small, bgcolor=_hbg)
-    table.cell(jTbl, 10, 0, "Fix P&L",       text_color=_hfg, text_size=size.small, bgcolor=_hbg)
+    table.cell(jTbl, 10, 0, _pnlHdr,         text_color=_hfg, text_size=size.small, bgcolor=_hbg)
     table.cell(jTbl, 11, 0, "Status / Sess", text_color=_hfg, text_size=size.small, bgcolor=_hbg)
 
     _n = array.size(jDir)
@@ -531,23 +542,29 @@ if barstate.islast and showJournal
             _lots = array.get(jLots,    r)
             _cpnl = array.get(jCmpdPnl, r)
             _sl   = array.size(jSL) > r ? array.get(jSL, r) : na
-            _win  = _st == "TP1 + TP2" or _st == "TP2 ✓"
+            // ── Slippage simulation: shift entry, reduce pts by slip cost ──
+            _disp_ent  = useSlipSim ? (_d == 1 ? _ent + simSlipPts : _ent - simSlipPts) : _ent
+            _disp_pts  = useSlipSim ? _pts - simSlipPts : _pts
+            _disp_pnl  = useSlipSim ? math.round(_disp_pts * fixedLot, 2) : _pnl
+            _disp_sl   = useSlipSim ? (na(_sl) ? na : (_d == 1 ? _sl + simSlipPts : _sl - simSlipPts)) : _sl
+            _win  = useSlipSim ? _disp_pts > 0 : (_st == "TP1 + TP2" or _st == "TP2 ✓")
             _bg   = _win ? color.new(#0a1f0a,0) : color.new(#1f0a0a,0)
             _pc   = _win ? color.new(#26a69a,0) : color.new(#f23645,0)
             _dc   = _d == 1 ? color.new(#26a69a,0) : color.new(#f23645,0)
+            _entCol = useSlipSim ? color.new(#ff9800,0) : color.new(#90caf9,0)
             _dateStr = str.tostring(dayofmonth(_inT,"UTC+5:30"),"00") + "/" + str.tostring(month(_inT,"UTC+5:30"),"00")
-            table.cell(jTbl, 0,  _row, _d == 1 ? "▲" : "▼",                                         text_color=_dc,                   text_size=size.small, bgcolor=_bg)
-            table.cell(jTbl, 1,  _row, _dateStr,                                                      text_color=color.silver,          text_size=size.small, bgcolor=_bg)
-            table.cell(jTbl, 2,  _row, fmtT(_inT),                                                   text_color=color.silver,          text_size=size.small, bgcolor=_bg)
-            table.cell(jTbl, 3,  _row, fmtT(_outT),                                                  text_color=color.silver,          text_size=size.small, bgcolor=_bg)
-            table.cell(jTbl, 4,  _row, fmtPx(_ent),                                                  text_color=color.new(#90caf9,0),  text_size=size.small, bgcolor=_bg)
-            table.cell(jTbl, 5,  _row, fmtPx(_ext),                                                  text_color=_pc,                   text_size=size.small, bgcolor=_bg)
-            table.cell(jTbl, 6,  _row, na(_sl) ? "—" : str.tostring(math.round(_sl,1)),               text_color=color.new(#ff4444,0),  text_size=size.small, bgcolor=_bg)
-            table.cell(jTbl, 7,  _row, (_pts >= 0 ? "+" : "") + str.tostring(_pts),                  text_color=_pc,                   text_size=size.small, bgcolor=_bg)
-            table.cell(jTbl, 8,  _row, str.tostring(_lots),                                           text_color=color.new(#d1d5db,0),  text_size=size.small, bgcolor=_bg)
-            table.cell(jTbl, 9,  _row, (_cpnl >= 0 ? "+$" : "-$") + str.tostring(math.abs(_cpnl)),   text_color=_pc,                   text_size=size.small, bgcolor=_bg)
-            table.cell(jTbl, 10, _row, (_pnl  >= 0 ? "+$" : "-$") + str.tostring(math.abs(_pnl)),   text_color=_pc,                   text_size=size.small, bgcolor=_bg)
-            table.cell(jTbl, 11, _row, _st + " · " + _se,                                             text_color=_pc,                   text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 0,  _row, _d == 1 ? "▲" : "▼",                                              text_color=_dc,                   text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 1,  _row, _dateStr,                                                           text_color=color.silver,          text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 2,  _row, fmtT(_inT),                                                        text_color=color.silver,          text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 3,  _row, fmtT(_outT),                                                       text_color=color.silver,          text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 4,  _row, fmtPx(_disp_ent),                                                  text_color=_entCol,               text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 5,  _row, fmtPx(_ext),                                                       text_color=_pc,                   text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 6,  _row, na(_disp_sl) ? "—" : str.tostring(math.round(_disp_sl,1)),         text_color=color.new(#ff4444,0),  text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 7,  _row, (_disp_pts >= 0 ? "+" : "") + str.tostring(_disp_pts),             text_color=_pc,                   text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 8,  _row, str.tostring(_lots),                                                text_color=color.new(#d1d5db,0),  text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 9,  _row, (_cpnl >= 0 ? "+$" : "-$") + str.tostring(math.abs(_cpnl)),        text_color=_pc,                   text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 10, _row, (_disp_pnl >= 0 ? "+$" : "-$") + str.tostring(math.abs(_disp_pnl)),text_color=_pc,                   text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 11, _row, _st + " · " + _se,                                                 text_color=_pc,                   text_size=size.small, bgcolor=_bg)
         else
             for c = 0 to 11
                 table.cell(jTbl, c, _row, "", text_size=size.small, bgcolor=color.new(#111111,0))
@@ -581,13 +598,18 @@ if barstate.islast and showJournal
     _visJPnl  = 0.0
     _visJCPnl = 0.0
     _visJWins = 0
-    _visJN    = array.size(jDir)
+    _visJN    = math.min(array.size(jDir), maxJRows)
     for _rv = 0 to _visJN - 1
-        _visJPts  += array.get(jPts,     _rv)
-        _visJPnl  += array.get(jPnl,     _rv)
+        _rv_pts = array.get(jPts, _rv)
+        _rv_pnl = array.get(jPnl, _rv)
+        _sim_rv_pts = useSlipSim ? _rv_pts - simSlipPts : _rv_pts
+        _sim_rv_pnl = useSlipSim ? math.round(_sim_rv_pts * fixedLot, 2) : _rv_pnl
+        _visJPts  += _sim_rv_pts
+        _visJPnl  += _sim_rv_pnl
         _visJCPnl += array.get(jCmpdPnl, _rv)
         _vst = array.get(jStat, _rv)
-        if _vst == "TP1 + TP2" or _vst == "TP2 ✓"
+        _vis_win = useSlipSim ? _sim_rv_pts > 0 : (_vst == "TP1 + TP2" or _vst == "TP2 ✓")
+        if _vis_win
             _visJWins += 1
     _visWr      = _visJN > 0 ? math.round(_visJWins / _visJN * 100) : 0
     _visPtsStr  = (_visJPts  >= 0 ? "+" : "") + str.tostring(math.round(_visJPts,1)) + " pts"
@@ -596,9 +618,11 @@ if barstate.islast and showJournal
     _visPtsCol  = _visJPts  >= 0 ? color.new(#26a69a,0) : color.new(#f23645,0)
     _visCPnlCol = _visJCPnl >= 0 ? color.new(#26a69a,0) : color.new(#f23645,0)
     _visPnlCol  = _visJPnl  >= 0 ? color.new(#26a69a,0) : color.new(#f23645,0)
-    _sbg        = color.new(#0d1a0d,0)
+    _sbg        = useSlipSim ? color.new(#1a0800,0) : color.new(#0d1a0d,0)
+    _wrCol      = useSlipSim ? color.new(#ff9800,0) : color.new(#26a69a,0)
+    _wrLabel    = useSlipSim ? "SIM WR " : "WR "
     _statsRow   = maxJRows + 2
-    table.cell(jTbl, 0,  _statsRow, "WR " + str.tostring(_visWr) + "% (" + str.tostring(_visJWins) + "/" + str.tostring(_visJN) + ")", text_color=color.new(#26a69a,0), text_size=size.small, bgcolor=_sbg)
+    table.cell(jTbl, 0,  _statsRow, _wrLabel + str.tostring(_visWr) + "% (" + str.tostring(_visJWins) + "/" + str.tostring(_visJN) + ")", text_color=_wrCol, text_size=size.small, bgcolor=_sbg)
     table.cell(jTbl, 1,  _statsRow, "", text_color=color.gray, text_size=size.small, bgcolor=_sbg)
     table.cell(jTbl, 2,  _statsRow, "", text_color=color.gray, text_size=size.small, bgcolor=_sbg)
     table.cell(jTbl, 3,  _statsRow, "", text_color=color.gray, text_size=size.small, bgcolor=_sbg)
