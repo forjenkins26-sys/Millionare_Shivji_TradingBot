@@ -3,10 +3,10 @@
 volsurge_v5_live.py — Vol Surge Bot v5 Live (WebSocket-native, No Webhook)
 ===========================================================================
 Architecture:
-  Delta WebSocket → CandleFeed (15m) → SignalEngine → _process_entry → Delta Orders
-                                                    (NO TradingView webhook dependency)
+  Delta WebSocket → CandleFeed (5m) → SignalEngine → _process_entry → Delta Orders
+                                                   (NO TradingView webhook dependency)
 
-Signal source  : Python computes Vol Surge signal directly from Delta 15m WebSocket candles
+Signal source  : Python computes Vol Surge signal directly from Delta 5m WebSocket candles
 Execution      : Identical to v4 (market entry + SL stop + TP limit on Delta Exchange)
 SL/TP model    : Fill-based — anchored to actual Delta fill price, not Pine signal price
 Lifecycle      : IDLE → ENTERED → CLOSED (same as v4)
@@ -97,9 +97,12 @@ USE_HA        = os.getenv("USE_HA_CANDLES", "true").lower() == "true"
 
 # ── Trade parameters ──────────────────────────────────────────────────
 # TP_R: must match Pine's vsTP2R (currently 1.4R)
-TP_R               = float(os.getenv("TP_R", "1.4"))
+TP_R                   = float(os.getenv("TP_R", "1.4"))
 MAX_SLIPPAGE_RATIO     = float(os.getenv("MAX_SLIPPAGE_RATIO", "0.0"))
 MAX_PRE_ENTRY_SLIP_PTS = float(os.getenv("MAX_PRE_ENTRY_SLIP_PTS", "0.0"))  # 0 = disabled
+# Fixed SL/TP override — set both > 0 to use fixed pts instead of ATR-based
+FIXED_SL_PTS           = float(os.getenv("FIXED_SL_PTS", "0.0"))   # 0 = dynamic (default)
+FIXED_TP_PTS           = float(os.getenv("FIXED_TP_PTS", "0.0"))   # 0 = dynamic (default)
 
 PRICE_INTERVAL = 1   # seconds between position monitor ticks (1s = ~4pt worst-case SL slippage vs 9pt at 2s)
 POS_MON_DELAY  = 3   # seconds to wait after entry before monitor starts
@@ -764,10 +767,12 @@ def _set_open_trade(
 
     _bar_close_ist = (datetime.utcfromtimestamp(pine_signal_time / 1000) + timedelta(seconds=19800)).strftime("%d/%m %H:%M:%S") if pine_signal_time else "?"
     _fill_ist      = (datetime.utcnow() + timedelta(seconds=19800)).strftime("%H:%M:%S")
+    _sl_mode       = f"FIXED {FIXED_SL_PTS:.0f}pts" if FIXED_SL_PTS > 0 else "ATR"
+    _tp_mode       = f"FIXED {FIXED_TP_PTS:.0f}pts" if FIXED_TP_PTS > 0 else f"{TP_R}R"
     tg(
-        f"{'📄 PAPER' if PAPER_MODE else '🟢 LIVE'} <b>{d} ENTERED</b> [v5 WebSocket]\n"
+        f"{'📄 PAPER' if PAPER_MODE else '🟢 LIVE'} <b>{d} ENTERED</b> [v5 5m WebSocket]\n"
         f"Fill: <b>{fill_price:,.1f}</b> | Slip: {entry_slippage:+.2f}pts\n"
-        f"SL: {sl_price:,.1f} | TP: {tp_price:,.1f} ({TP_R}R)\n"
+        f"SL: {sl_price:,.1f} [{_sl_mode}] | TP: {tp_price:,.1f} [{_tp_mode}]\n"
         f"Bar close: {_bar_close_ist} IST | Fill: {_fill_ist} IST\n"
         f"Signal lat: {signal_latency_ms:.0f}ms | Entry lat: {entry_latency_ms:.0f}ms\n"
         f"Structure: <b>{_grade}</b> | Chop: {chop_avg_tr:.1f} Burst: {burst_threshold:.1f}"
@@ -1055,14 +1060,14 @@ def _process_entry(
             entry_contracts = _btc_to_contracts(LOT_SIZE, pine_entry_px)
 
             # ── Pre-entry price guard ─────────────────────────────────────
-            # Skip entry if price has already moved too far from signal price
-            # before we even place the order. Uses cached WS price (no REST call).
+            # Skip entry if price already moved too far from signal price.
+            # Uses cached WS mark price — no REST call, near-zero latency.
             if MAX_PRE_ENTRY_SLIP_PTS > 0:
                 _cur_px = fetch_price()
                 if _cur_px:
                     _pre_slip = (_cur_px - pine_entry_px) if d == "BUY" else (pine_entry_px - _cur_px)
                     if _pre_slip > MAX_PRE_ENTRY_SLIP_PTS:
-                        _logw(f"ENTRY SKIPPED [PRE-GUARD] price moved {_pre_slip:+.1f}pts before order | signal={pine_entry_px:,.1f} now={_cur_px:,.1f}")
+                        _logw(f"ENTRY SKIPPED [PRE-GUARD] price moved {_pre_slip:+.1f}pts | signal={pine_entry_px:,.1f} now={_cur_px:,.1f}")
                         tg(
                             f"⏭ <b>ENTRY SKIPPED [{d}]</b>\n"
                             f"Price moved <b>{_pre_slip:+.1f}pts</b> before order placed\n"
@@ -1098,10 +1103,18 @@ def _process_entry(
                     fill_px = fetch_price() or pine_entry_px
             fill_px = round(fill_px, 1)
 
+            # ── Fixed SL/TP override ──────────────────────────────────────
+            # When FIXED_SL_PTS > 0, use fixed pts instead of ATR-based sl_dist.
+            # FIXED_TP_PTS > 0 overrides TP independently (e.g. 100/100 = 1:1 R:R).
+            if FIXED_SL_PTS > 0:
+                sl_dist = FIXED_SL_PTS
+                _log(f"[FIXED SL] Overriding sl_dist → {sl_dist:.0f}pts")
+            _tp_pts = FIXED_TP_PTS if FIXED_TP_PTS > 0 else sl_dist * TP_R
+
             # Fill-based SL/TP
             close_side = "sell" if d == "BUY" else "buy"
             sl_price   = round(fill_px - sl_dist, 1) if d == "BUY" else round(fill_px + sl_dist, 1)
-            tp_price   = round(fill_px + sl_dist * TP_R, 1) if d == "BUY" else round(fill_px - sl_dist * TP_R, 1)
+            tp_price   = round(fill_px + _tp_pts,  1) if d == "BUY" else round(fill_px - _tp_pts,  1)
 
             # For stop orders, Delta requires stop_price to be away from mark price.
             # BUY stop (close SELL): stop_price must be ABOVE mark price.
@@ -1117,8 +1130,6 @@ def _process_entry(
                 _logw(f"SL stop price adjusted to {sl_price} (below mark {_mark}) to avoid rejection")
 
             # ── Parallel SL + TP placement ────────────────────────────────
-            # SL is a no-op (software monitor), TP is the only real REST call.
-            # Run both in threads so TP placement doesn't block state saving.
             import concurrent.futures as _cf
             with _cf.ThreadPoolExecutor(max_workers=2) as _pool:
                 _sl_fut = _pool.submit(place_sl_order, close_side, LOT_SIZE, sl_price, entry_contracts)
@@ -1245,7 +1256,7 @@ engine = SignalEngine(config=sig_cfg, logger=logging.getLogger("signal_engine"))
 
 def on_candle_close(candle: Candle, buffer: deque):
     """
-    Called by CandleFeed on every confirmed 15m bar close.
+    Called by CandleFeed on every confirmed 5m bar close.
     Runs in the asyncio event loop thread — must not block.
     Entry processing spawned in a daemon thread.
     """
@@ -1293,10 +1304,10 @@ def on_candle_close(candle: Candle, buffer: deque):
             "pine_entry_px":     sr.entry_price,
             "pine_tp":           sr.tp2,
             "pine_sl":           sr.sl,
-            "pine_signal_time":  (sr.ts + 900) * 1000,  # bar CLOSE Unix ms (start + 15m=900s)
+            "pine_signal_time":  (sr.ts + 300) * 1000,  # bar CLOSE Unix ms (start + 5m=300s)
             "recv_time":         recv_time,
             "trade_id":          trade_id,
-            "signal_timeframe":  "15",       # 15m candles (CandleFeed candlestick_15m)
+            "signal_timeframe":  "5",        # 5m candles (CandleFeed candlestick_5m)
             "signal_tf_bar_time": sr.ts,
             # v5 signal context
             "chop_avg_tr":       state.chop_avg_tr,
@@ -1537,7 +1548,7 @@ async def _orphan_recovery():
             "chop_avg_tr":        0.0,
             "burst_threshold":    0.0,
             "candle_body":        0.0,
-            "signal_timeframe":   "15",
+            "signal_timeframe":   "5",
             "signal_tf_bar_time": "",
             "pine_tp":            tp_price,
             "pine_sl":            sl_price,
@@ -1572,11 +1583,11 @@ async def _feed_watchdog():
         elif not feed.is_ready:
             log.warning("[WATCHDOG] Feed not ready — buffer thin")
         elif feed.last_closed:
-            # Measure from bar CLOSE (ts + 900), not bar START (ts)
-            # A 15m bar starts 900s before it closes — using ts directly
-            # makes age=15min immediately after close, causing false alarms.
-            age = time.time() - (feed.last_closed.ts + 900)
-            if age > 1200:   # warn if no bar has CLOSED in the last 20min
+            # Measure from bar CLOSE (ts + 300), not bar START (ts)
+            # A 5m bar starts 300s before it closes — using ts directly
+            # makes age=5min immediately after close, causing false alarms.
+            age = time.time() - (feed.last_closed.ts + 300)
+            if age > 600:   # warn if no bar has CLOSED in the last 10min (2x 5m bars)
                 log.warning(f"[WATCHDOG] No bar in {age/60:.1f}min — stale feed")
                 tg(f"⚠️ Vol Surge v5: No candle received for {age/60:.1f}min — stale feed")
         await asyncio.sleep(300)
@@ -1708,7 +1719,7 @@ async def test_fire(side: str, confirm: str = "", sl_dist_pts: float = 0):
             pine_signal_time=int(now * 1000),   # ms
             recv_time=now,
             trade_id=trade_id,
-            signal_timeframe="15",
+            signal_timeframe="5",
             signal_tf_bar_time=int(now),
             chop_avg_tr=150.0,
             burst_threshold=300.0,
