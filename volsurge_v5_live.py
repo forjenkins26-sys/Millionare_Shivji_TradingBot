@@ -762,10 +762,13 @@ def _set_open_trade(
     elif _ratio >= 0.5:
         _logw(f"[STRUCTURE DEGRADED] ratio={_ratio:.3f}")
 
+    _bar_close_ist = (datetime.utcfromtimestamp(pine_signal_time / 1000) + timedelta(seconds=19800)).strftime("%d/%m %H:%M:%S") if pine_signal_time else "?"
+    _fill_ist      = (datetime.utcnow() + timedelta(seconds=19800)).strftime("%H:%M:%S")
     tg(
         f"{'📄 PAPER' if PAPER_MODE else '🟢 LIVE'} <b>{d} ENTERED</b> [v5 WebSocket]\n"
         f"Fill: <b>{fill_price:,.1f}</b> | Slip: {entry_slippage:+.2f}pts\n"
         f"SL: {sl_price:,.1f} | TP: {tp_price:,.1f} ({TP_R}R)\n"
+        f"Bar close: {_bar_close_ist} IST | Fill: {_fill_ist} IST\n"
         f"Signal lat: {signal_latency_ms:.0f}ms | Entry lat: {entry_latency_ms:.0f}ms\n"
         f"Structure: <b>{_grade}</b> | Chop: {chop_avg_tr:.1f} Burst: {burst_threshold:.1f}"
     )
