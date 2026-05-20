@@ -3,10 +3,10 @@
 volsurge_v5_live.py — Vol Surge Bot v5 Live (WebSocket-native, No Webhook)
 ===========================================================================
 Architecture:
-  Delta WebSocket → CandleFeed (15m) → SignalEngine → _process_entry → Delta Orders
-                                                    (NO TradingView webhook dependency)
+  Delta WebSocket → CandleFeed (5m) → SignalEngine → _process_entry → Delta Orders
+                                                   (NO TradingView webhook dependency)
 
-Signal source  : Python computes Vol Surge signal directly from Delta 15m WebSocket candles
+Signal source  : Python computes Vol Surge signal directly from Delta 5m WebSocket candles
 Execution      : Identical to v4 (market entry + SL stop + TP limit on Delta Exchange)
 SL/TP model    : Fill-based — anchored to actual Delta fill price, not Pine signal price
 Lifecycle      : IDLE → ENTERED → CLOSED (same as v4)
@@ -97,8 +97,12 @@ USE_HA        = os.getenv("USE_HA_CANDLES", "true").lower() == "true"
 
 # ── Trade parameters ──────────────────────────────────────────────────
 # TP_R: must match Pine's vsTP2R (currently 1.4R)
-TP_R               = float(os.getenv("TP_R", "1.4"))
-MAX_SLIPPAGE_RATIO = float(os.getenv("MAX_SLIPPAGE_RATIO", "0.0"))
+TP_R                   = float(os.getenv("TP_R", "1.4"))
+MAX_SLIPPAGE_RATIO     = float(os.getenv("MAX_SLIPPAGE_RATIO", "0.0"))
+MAX_PRE_ENTRY_SLIP_PTS = float(os.getenv("MAX_PRE_ENTRY_SLIP_PTS", "0.0"))  # 0 = disabled
+# Fixed SL/TP override — set both > 0 to use fixed pts instead of ATR-based
+FIXED_SL_PTS           = float(os.getenv("FIXED_SL_PTS", "0.0"))   # 0 = dynamic (default)
+FIXED_TP_PTS           = float(os.getenv("FIXED_TP_PTS", "0.0"))   # 0 = dynamic (default)
 
 PRICE_INTERVAL = 2   # seconds between position monitor ticks
 POS_MON_DELAY  = 3   # seconds to wait after entry before monitor starts
@@ -178,6 +182,8 @@ def _handle_shutdown(signum, frame):
             )
         else:
             log.info(f"[SHUTDOWN] {sig_name} — no open trade — clean shutdown")
+            ist_now = (datetime.utcnow() + timedelta(seconds=19800)).strftime("%d/%m %H:%M IST")
+            tg(f"🔴 <b>Bot offline ({sig_name})</b>\nNo open trade — clean shutdown\nTime: {ist_now}")
     sys.exit(0)
 
 _signal.signal(_signal.SIGTERM, _handle_shutdown)
@@ -340,12 +346,19 @@ def _sign(method: str, path: str, qs: str = "", body: str = "") -> dict:
     ).hexdigest()
     return {"api-key": API_KEY, "timestamp": ts, "signature": sig, "Content-Type": "application/json"}
 
+# Persistent HTTP session — reuses TCP+TLS connection across all API calls.
+# Eliminates 50-100ms handshake overhead per request (critical for entry latency).
+_http = requests.Session()
+_http.mount("https://", requests.adapters.HTTPAdapter(
+    pool_connections=2, pool_maxsize=4, max_retries=0
+))
+
 def _get(path: str, params: Optional[dict] = None):
     qs = ""
     if params:
         qs = "?" + "&".join(f"{k}={v}" for k, v in params.items())
     try:
-        r = requests.get(BASE_URL + path + qs, headers=_sign("GET", path, qs), timeout=10)
+        r = _http.get(BASE_URL + path + qs, headers=_sign("GET", path, qs), timeout=10)
         if r.status_code != 200:
             _loge(f"GET {path} HTTP {r.status_code} | {r.text[:300]}")
         return r.json()
@@ -356,7 +369,7 @@ def _get(path: str, params: Optional[dict] = None):
 def _post(path: str, body_dict: dict):
     body = json.dumps(body_dict)
     try:
-        r = requests.post(BASE_URL + path, headers=_sign("POST", path, "", body), data=body, timeout=10)
+        r = _http.post(BASE_URL + path, headers=_sign("POST", path, "", body), data=body, timeout=10)
         return r.json()
     except Exception as e:
         _loge(f"POST {path} error: {e}")
@@ -752,10 +765,15 @@ def _set_open_trade(
     elif _ratio >= 0.5:
         _logw(f"[STRUCTURE DEGRADED] ratio={_ratio:.3f}")
 
+    _bar_close_ist = (datetime.utcfromtimestamp(pine_signal_time / 1000) + timedelta(seconds=19800)).strftime("%d/%m %H:%M:%S") if pine_signal_time else "?"
+    _fill_ist      = (datetime.utcnow() + timedelta(seconds=19800)).strftime("%H:%M:%S")
+    _sl_mode       = f"FIXED {FIXED_SL_PTS:.0f}pts" if FIXED_SL_PTS > 0 else "ATR"
+    _tp_mode       = f"FIXED {FIXED_TP_PTS:.0f}pts" if FIXED_TP_PTS > 0 else f"{TP_R}R"
     tg(
-        f"{'📄 PAPER' if PAPER_MODE else '🟢 LIVE'} <b>{d} ENTERED</b> [v5 WebSocket]\n"
+        f"{'📄 PAPER' if PAPER_MODE else '🟢 LIVE'} <b>{d} ENTERED</b> [v5 5m WebSocket]\n"
         f"Fill: <b>{fill_price:,.1f}</b> | Slip: {entry_slippage:+.2f}pts\n"
-        f"SL: {sl_price:,.1f} | TP: {tp_price:,.1f} ({TP_R}R)\n"
+        f"SL: {sl_price:,.1f} [{_sl_mode}] | TP: {tp_price:,.1f} [{_tp_mode}]\n"
+        f"Bar close: {_bar_close_ist} IST | Fill: {_fill_ist} IST\n"
         f"Signal lat: {signal_latency_ms:.0f}ms | Entry lat: {entry_latency_ms:.0f}ms\n"
         f"Structure: <b>{_grade}</b> | Chop: {chop_avg_tr:.1f} Burst: {burst_threshold:.1f}"
     )
@@ -1040,6 +1058,24 @@ def _process_entry(
         else:
             side            = "buy" if d == "BUY" else "sell"
             entry_contracts = _btc_to_contracts(LOT_SIZE, pine_entry_px)
+
+            # ── Pre-entry price guard ─────────────────────────────────────
+            # Skip entry if price already moved too far from signal price.
+            # Uses cached WS mark price — no REST call, near-zero latency.
+            if MAX_PRE_ENTRY_SLIP_PTS > 0:
+                _cur_px = fetch_price()
+                if _cur_px:
+                    _pre_slip = (_cur_px - pine_entry_px) if d == "BUY" else (pine_entry_px - _cur_px)
+                    if _pre_slip > MAX_PRE_ENTRY_SLIP_PTS:
+                        _logw(f"ENTRY SKIPPED [PRE-GUARD] price moved {_pre_slip:+.1f}pts | signal={pine_entry_px:,.1f} now={_cur_px:,.1f}")
+                        tg(
+                            f"⏭ <b>ENTRY SKIPPED [{d}]</b>\n"
+                            f"Price moved <b>{_pre_slip:+.1f}pts</b> before order placed\n"
+                            f"Signal: {pine_entry_px:,.1f} | Now: {_cur_px:,.1f}\n"
+                            f"Max allowed: {MAX_PRE_ENTRY_SLIP_PTS:.0f}pts — skipping to protect R:R"
+                        )
+                        return
+
             _log_lifecycle(trade_id, "ENTRY_SENT", side=side, qty=entry_contracts,
                            price=pine_entry_px, notes=f"contracts={entry_contracts}")
             result = place_market_order(side, LOT_SIZE, ref_price=pine_entry_px)
@@ -1054,19 +1090,31 @@ def _process_entry(
             api_ack_time     = result.get("api_ack_time")
             fill_px          = result.get("fill_price")
 
+            # ── Fill price fallback: fast polling instead of 1.5s sleep ──
             if not fill_px:
-                time.sleep(1.5)
-                pos = get_open_position()
-                if pos and pos is not _POS_API_ERROR:
-                    fill_px = float(pos.get("entry_price", pine_entry_px))
-                else:
-                    fill_px = pine_entry_px
+                for _poll in range(5):
+                    time.sleep(0.25)
+                    pos = get_open_position()
+                    if pos and pos is not _POS_API_ERROR:
+                        fill_px = float(pos.get("entry_price", 0)) or None
+                        if fill_px:
+                            break
+                if not fill_px:
+                    fill_px = fetch_price() or pine_entry_px
             fill_px = round(fill_px, 1)
+
+            # ── Fixed SL/TP override ──────────────────────────────────────
+            # When FIXED_SL_PTS > 0, use fixed pts instead of ATR-based sl_dist.
+            # FIXED_TP_PTS > 0 overrides TP independently (e.g. 100/100 = 1:1 R:R).
+            if FIXED_SL_PTS > 0:
+                sl_dist = FIXED_SL_PTS
+                _log(f"[FIXED SL] Overriding sl_dist → {sl_dist:.0f}pts")
+            _tp_pts = FIXED_TP_PTS if FIXED_TP_PTS > 0 else sl_dist * TP_R
 
             # Fill-based SL/TP
             close_side = "sell" if d == "BUY" else "buy"
             sl_price   = round(fill_px - sl_dist, 1) if d == "BUY" else round(fill_px + sl_dist, 1)
-            tp_price   = round(fill_px + sl_dist * TP_R, 1) if d == "BUY" else round(fill_px - sl_dist * TP_R, 1)
+            tp_price   = round(fill_px + _tp_pts,  1) if d == "BUY" else round(fill_px - _tp_pts,  1)
 
             # For stop orders, Delta requires stop_price to be away from mark price.
             # BUY stop (close SELL): stop_price must be ABOVE mark price.
@@ -1081,8 +1129,13 @@ def _process_entry(
                 sl_price = round(_mark - _sl_buffer, 1)
                 _logw(f"SL stop price adjusted to {sl_price} (below mark {_mark}) to avoid rejection")
 
-            sl_result = place_sl_order(close_side, LOT_SIZE, sl_price, contracts=entry_contracts)
-            tp_result = place_tp_order(close_side, LOT_SIZE, tp_price, contracts=entry_contracts)
+            # ── Parallel SL + TP placement ────────────────────────────────
+            import concurrent.futures as _cf
+            with _cf.ThreadPoolExecutor(max_workers=2) as _pool:
+                _sl_fut = _pool.submit(place_sl_order, close_side, LOT_SIZE, sl_price, entry_contracts)
+                _tp_fut = _pool.submit(place_tp_order, close_side, LOT_SIZE, tp_price, entry_contracts)
+                sl_result = _sl_fut.result()
+                tp_result = _tp_fut.result()
 
             sl_oid      = sl_result["order_id"]   if sl_result else None
             sl_placed_t = sl_result["placed_time"] if sl_result else None
@@ -1193,7 +1246,7 @@ engine = SignalEngine(config=sig_cfg, logger=logging.getLogger("signal_engine"))
 
 def on_candle_close(candle: Candle, buffer: deque):
     """
-    Called by CandleFeed on every confirmed 15m bar close.
+    Called by CandleFeed on every confirmed 5m bar close.
     Runs in the asyncio event loop thread — must not block.
     Entry processing spawned in a daemon thread.
     """
@@ -1241,10 +1294,10 @@ def on_candle_close(candle: Candle, buffer: deque):
             "pine_entry_px":     sr.entry_price,
             "pine_tp":           sr.tp2,
             "pine_sl":           sr.sl,
-            "pine_signal_time":  (sr.ts + 900) * 1000,  # bar CLOSE Unix ms (start + 15m=900s)
+            "pine_signal_time":  (sr.ts + 300) * 1000,  # bar CLOSE Unix ms (start + 5m=300s)
             "recv_time":         recv_time,
             "trade_id":          trade_id,
-            "signal_timeframe":  "15",       # 15m candles (CandleFeed candlestick_15m)
+            "signal_timeframe":  "5",        # 5m candles (CandleFeed candlestick_5m)
             "signal_tf_bar_time": sr.ts,
             # v5 signal context
             "chop_avg_tr":       state.chop_avg_tr,
@@ -1485,7 +1538,7 @@ async def _orphan_recovery():
             "chop_avg_tr":        0.0,
             "burst_threshold":    0.0,
             "candle_body":        0.0,
-            "signal_timeframe":   "15",
+            "signal_timeframe":   "5",
             "signal_tf_bar_time": "",
             "pine_tp":            tp_price,
             "pine_sl":            sl_price,
@@ -1520,11 +1573,11 @@ async def _feed_watchdog():
         elif not feed.is_ready:
             log.warning("[WATCHDOG] Feed not ready — buffer thin")
         elif feed.last_closed:
-            # Measure from bar CLOSE (ts + 900), not bar START (ts)
-            # A 15m bar starts 900s before it closes — using ts directly
-            # makes age=15min immediately after close, causing false alarms.
-            age = time.time() - (feed.last_closed.ts + 900)
-            if age > 1200:   # warn if no bar has CLOSED in the last 20min
+            # Measure from bar CLOSE (ts + 300), not bar START (ts)
+            # A 5m bar starts 300s before it closes — using ts directly
+            # makes age=5min immediately after close, causing false alarms.
+            age = time.time() - (feed.last_closed.ts + 300)
+            if age > 600:   # warn if no bar has CLOSED in the last 10min (2x 5m bars)
                 log.warning(f"[WATCHDOG] No bar in {age/60:.1f}min — stale feed")
                 tg(f"⚠️ Vol Surge v5: No candle received for {age/60:.1f}min — stale feed")
         await asyncio.sleep(300)
@@ -1650,7 +1703,7 @@ async def test_fire(side: str, confirm: str = "", sl_dist_pts: float = 0):
             pine_signal_time=int(now * 1000),   # ms
             recv_time=now,
             trade_id=trade_id,
-            signal_timeframe="15",
+            signal_timeframe="5",
             signal_tf_bar_time=int(now),
             chop_avg_tr=150.0,
             burst_threshold=300.0,
@@ -1772,19 +1825,30 @@ async def dashboard():
             return f"{s//60}m {s%60}s" if s >= 60 else f"{s}s"
         except: return "—"
 
-    def _dt(v):
+    def _to_ist(v):
+        """Parse Unix float OR ISO string → IST naive datetime.
+        entry_fill_time / signal_recv_time are stored as Unix floats (time.time()).
+        exit_time is stored as ISO string (datetime.now().isoformat()).
+        Both must work here."""
+        s = str(v).strip()
+        # Try Unix timestamp first (covers entry_fill_time, signal_recv_time, etc.)
         try:
-            return (datetime.fromisoformat(str(v)[:19]) + timedelta(seconds=19800)).strftime("%d/%m %H:%M")
+            return datetime.utcfromtimestamp(float(s)) + timedelta(seconds=19800)
+        except (ValueError, OverflowError, OSError):
+            pass
+        # Fall back to ISO string (covers exit_time, etc.)
+        return datetime.fromisoformat(s[:19]) + timedelta(seconds=19800)
+
+    def _dt(v):
+        try: return _to_ist(v).strftime("%d/%m %H:%M")
         except: return "—"
 
     def _date(v):
-        try:
-            return (datetime.fromisoformat(str(v)[:19]) + timedelta(seconds=19800)).strftime("%d/%m")
+        try: return _to_ist(v).strftime("%d/%m")
         except: return "—"
 
     def _time_only(v):
-        try:
-            return (datetime.fromisoformat(str(v)[:19]) + timedelta(seconds=19800)).strftime("%H:%M")
+        try: return _to_ist(v).strftime("%H:%M")
         except: return "—"
 
     def _pc(v):
@@ -1987,8 +2051,8 @@ async def dashboard():
           <td style="color:#d1d5db;font-size:11px;">{_dt(t.get('entry_fill_time',''))}</td>
           <td style="color:#9ca3af;text-align:center;">{t.get('signal_timeframe','—')}</td>
           <td style="color:#e5e7eb;text-align:right;">{_f(t.get('fill_price',''))}</td>
-          <td style="color:#34d399;text-align:right;">{_f(t.get('pine_tp',''))}</td>
-          <td style="color:#f87171;text-align:right;">{_f(t.get('pine_sl',''))}</td>
+          <td style="color:#34d399;text-align:right;">{_f(t.get('tp_price',''))}</td>
+          <td style="color:#f87171;text-align:right;">{_f(t.get('sl_price',''))}</td>
           <td style="color:#e5e7eb;text-align:right;">{_f(t.get('exit_price',''))}</td>
           <td style="text-align:right;">{_pc(t.get('pts',''))}</td>
           <td style="color:#9ca3af;text-align:right;">{_pts(t.get('pnl_approx',''))}</td>
@@ -2036,7 +2100,7 @@ async def dashboard():
           <td style="color:#d1d5db;font-size:11px;">{_time_only(t.get('exit_time',''))}</td>
           <td style="color:#e5e7eb;text-align:right;">{_f(t.get('fill_price',''))}</td>
           <td style="color:#e5e7eb;text-align:right;">{_f(t.get('exit_price',''))}</td>
-          <td style="color:#f87171;text-align:right;">{_f(t.get('pine_sl',''))}</td>
+          <td style="color:#f87171;text-align:right;">{_f(t.get('sl_price',''))}</td>
           <td style="color:{pts_col};text-align:right;font-weight:700;">{'+' if pts_val>=0 else ''}{pts_val:.1f}</td>
           <td style="color:#9ca3af;text-align:right;">{lot_val}</td>
           <td style="color:{pnl_col};text-align:right;font-weight:700;">{'+' if pnl_val>=0 else ''}{pnl_val:.2f}</td>
