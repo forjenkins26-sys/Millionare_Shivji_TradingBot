@@ -178,6 +178,8 @@ def _handle_shutdown(signum, frame):
             )
         else:
             log.info(f"[SHUTDOWN] {sig_name} — no open trade — clean shutdown")
+            ist_now = (datetime.utcnow() + timedelta(seconds=19800)).strftime("%d/%m %H:%M IST")
+            tg(f"🔴 <b>Bot offline ({sig_name})</b>\nNo open trade — clean shutdown\nTime: {ist_now}")
     sys.exit(0)
 
 _signal.signal(_signal.SIGTERM, _handle_shutdown)
@@ -1539,6 +1541,12 @@ async def _feed_watchdog():
                 tg(f"⚠️ Vol Surge v5: No candle received for {age/60:.1f}min — stale feed")
         await asyncio.sleep(300)
 
+
+@app.head("/health")
+@app.head("/")
+async def health_head():
+    """Lightweight HEAD ping for UptimeRobot free plan."""
+    return JSONResponse(content={}, status_code=200)
 
 @app.get("/")
 @app.get("/health")
