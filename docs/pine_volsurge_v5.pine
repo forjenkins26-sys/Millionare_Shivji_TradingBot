@@ -643,34 +643,51 @@ var table atTbl = table.new(position.bottom_left, 2, 9,
   frame_color=color.new(#555555,0), frame_width=1)
 
 if barstate.islast and showJournal
-    _awt  = statTrades > 0 ? math.round(statWins / statTrades * 100) : 0
-    _aret = startBal > 0 ? math.round(statPnl / startBal * 100, 1) : 0.0
-    _ahbg = color.new(#1a1400,0)
-    _ahfg = color.new(#ffeb3b,0)
+    // ── Sim-adjusted all-time stats: iterate all journal trades ──────────
+    _sim_at_wins = 0
+    _sim_at_pts  = 0.0
+    _at_n = array.size(jPts)
+    if useSlipSim and _at_n > 0
+        for _i = 0 to _at_n - 1
+            _op = array.get(jPts, _i)
+            _sp = _op - simSlipPts
+            _sim_at_pts += _sp
+            if _sp > 0
+                _sim_at_wins += 1
+
+    _disp_wins = useSlipSim ? _sim_at_wins : statWins
+    _disp_pts  = useSlipSim ? _sim_at_pts  : statPts
+    _disp_pnl  = useSlipSim ? math.round(_sim_at_pts * fixedLot, 2) : statPnl
+    _disp_bal  = useSlipSim ? startBal + _disp_pnl : balance
+
+    _awt  = statTrades > 0 ? math.round(_disp_wins / statTrades * 100) : 0
+    _aret = startBal > 0 ? math.round(_disp_pnl / startBal * 100, 1) : 0.0
+    _ahbg = useSlipSim ? color.new(#1a0800,0) : color.new(#1a1400,0)
+    _ahfg = useSlipSim ? color.new(#ff9800,0) : color.new(#ffeb3b,0)
     _asbg = color.new(#111111,0)
     _amc  = color.new(#787b86,0)
     _ass  = size.small
 
     _awrCol   = _awt >= 60 ? color.new(#26a69a,0) : _awt >= 40 ? color.new(#ff9800,0) : color.new(#f23645,0)
-    _apnlCol  = statPnl     >= 0 ? color.new(#26a69a,0) : color.new(#f23645,0)
+    _apnlCol  = _disp_pnl  >= 0 ? color.new(#26a69a,0) : color.new(#f23645,0)
     _acpnlCol = at_cmpd_acc >= 0 ? color.new(#26a69a,0) : color.new(#f23645,0)
-    _abalCol  = balance >= startBal ? color.new(#26a69a,0) : color.new(#f23645,0)
+    _abalCol  = _disp_bal  >= startBal ? color.new(#26a69a,0) : color.new(#f23645,0)
     _aretCol  = _aret >= 0 ? color.new(#26a69a,0) : color.new(#f23645,0)
 
-    _atTitle = useSlipSim ? "ALL-TIME (original)" : "ALL-TIME STATS"
-    _atSubtitle = useSlipSim ? str.tostring(statTrades) + " trades (no sim)" : str.tostring(statTrades) + " total trades"
-    table.cell(atTbl, 0, 0, _atTitle,     text_color=_ahfg, text_size=_ass, bgcolor=_ahbg)
-    table.cell(atTbl, 1, 0, _atSubtitle,  text_color=_amc,  text_size=_ass, bgcolor=_ahbg)
+    _atTitle    = useSlipSim ? "ALL-TIME (sim " + str.tostring(simSlipPts, "#") + "pts)" : "ALL-TIME STATS"
+    _atSubtitle = str.tostring(statTrades) + " total trades"
+    table.cell(atTbl, 0, 0, _atTitle,    text_color=_ahfg, text_size=_ass, bgcolor=_ahbg)
+    table.cell(atTbl, 1, 0, _atSubtitle, text_color=_amc,  text_size=_ass, bgcolor=_ahbg)
     table.cell(atTbl, 0, 1, "Win Rate",         text_color=_amc,  text_size=_ass, bgcolor=_asbg)
-    table.cell(atTbl, 1, 1, str.tostring(_awt) + "% (" + str.tostring(statWins) + "/" + str.tostring(statTrades) + ")", text_color=_awrCol, text_size=_ass, bgcolor=_asbg)
+    table.cell(atTbl, 1, 1, str.tostring(_awt) + "% (" + str.tostring(_disp_wins) + "/" + str.tostring(statTrades) + ")", text_color=_awrCol, text_size=_ass, bgcolor=_asbg)
     table.cell(atTbl, 0, 2, "Total Pts",        text_color=_amc,  text_size=_ass, bgcolor=_asbg)
-    table.cell(atTbl, 1, 2, str.tostring(math.round(statPts,1)) + " pts", text_color=color.new(#d1d5db,0), text_size=_ass, bgcolor=_asbg)
+    table.cell(atTbl, 1, 2, str.tostring(math.round(_disp_pts,1)) + " pts", text_color=color.new(#d1d5db,0), text_size=_ass, bgcolor=_asbg)
     table.cell(atTbl, 0, 3, "Flat P&L",         text_color=_amc,  text_size=_ass, bgcolor=_asbg)
-    table.cell(atTbl, 1, 3, (statPnl >= 0 ? "+$" : "-$") + str.tostring(math.abs(math.round(statPnl,2))), text_color=_apnlCol, text_size=_ass, bgcolor=_asbg)
+    table.cell(atTbl, 1, 3, (_disp_pnl >= 0 ? "+$" : "-$") + str.tostring(math.abs(math.round(_disp_pnl,2))), text_color=_apnlCol, text_size=_ass, bgcolor=_asbg)
     table.cell(atTbl, 0, 4, "Cmpd P&L",         text_color=_amc,  text_size=_ass, bgcolor=_asbg)
     table.cell(atTbl, 1, 4, (at_cmpd_acc >= 0 ? "+$" : "-$") + str.tostring(math.abs(math.round(at_cmpd_acc,2))), text_color=_acpnlCol, text_size=_ass, bgcolor=_asbg)
     table.cell(atTbl, 0, 5, "Balance",          text_color=_amc,  text_size=_ass, bgcolor=_asbg)
-    table.cell(atTbl, 1, 5, "$" + str.tostring(math.round(balance,2)) + " (flat)", text_color=_abalCol, text_size=_ass, bgcolor=_asbg)
+    table.cell(atTbl, 1, 5, "$" + str.tostring(math.round(_disp_bal,2)) + " (flat)", text_color=_abalCol, text_size=_ass, bgcolor=_asbg)
     table.cell(atTbl, 0, 6, "Return",           text_color=_amc,  text_size=_ass, bgcolor=_asbg)
     table.cell(atTbl, 1, 6, (_aret >= 0 ? "+" : "") + str.tostring(_aret) + "%", text_color=_aretCol, text_size=_ass, bgcolor=_asbg)
     table.cell(atTbl, 0, 7, "Lot size",         text_color=_amc,  text_size=_ass, bgcolor=_asbg)
