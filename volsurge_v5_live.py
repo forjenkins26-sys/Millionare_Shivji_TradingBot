@@ -101,7 +101,7 @@ TP_R                   = float(os.getenv("TP_R", "1.4"))
 MAX_SLIPPAGE_RATIO     = float(os.getenv("MAX_SLIPPAGE_RATIO", "0.0"))
 MAX_PRE_ENTRY_SLIP_PTS = float(os.getenv("MAX_PRE_ENTRY_SLIP_PTS", "0.0"))  # legacy — superseded by limit entry
 # Limit entry — GTC limit at signal close price; waits for post-burst pullback
-ENTRY_LIMIT_TIMEOUT_S  = int(os.getenv("ENTRY_LIMIT_TIMEOUT_S",  "90"))   # 5m: 90s (≈ ½ bar); cancel if not filled
+ENTRY_LIMIT_TIMEOUT_S  = int(os.getenv("ENTRY_LIMIT_TIMEOUT_S",  "270"))  # 15m: 270s (30% of bar); cancel if not filled
 ENTRY_LIMIT_MAX_DRIFT  = float(os.getenv("ENTRY_LIMIT_MAX_DRIFT", "0.0")) # 0 = auto (1.5 × sl_dist); cancel if price runs this far
 # Fixed SL/TP override — set both > 0 to use fixed pts instead of ATR-based
 FIXED_SL_PTS           = float(os.getenv("FIXED_SL_PTS", "0.0"))   # 0 = dynamic (default)
@@ -574,6 +574,7 @@ def place_limit_entry_order(
         # Drift check — cancel if price runs too far without filling
         cur_price = fetch_price()
         if cur_price:
+<<<<<<< Updated upstream
             # BUY limit: drift = price running UP above limit (good direction but no pullback)
             # SELL limit: drift = price running DOWN below limit (good direction but no pullback)
             drift     = (cur_price - limit_price) if side.lower() == "buy" else (limit_price - cur_price)
