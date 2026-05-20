@@ -542,9 +542,12 @@ if barstate.islast and showJournal
             _lots = array.get(jLots,    r)
             _cpnl = array.get(jCmpdPnl, r)
             _sl   = array.size(jSL) > r ? array.get(jSL, r) : na
-            // ── Slippage simulation: shift entry, reduce pts by slip cost ──
+            // ── Slippage simulation ───────────────────────────────────────
+            // WIN:  entry shifts by slip → TP further → net pts = pts - simSlipPts
+            // LOSS: SL is fixed distance from fill → pts unchanged
+            _is_win    = _pts > 0
             _disp_ent  = useSlipSim ? (_d == 1 ? _ent + simSlipPts : _ent - simSlipPts) : _ent
-            _disp_pts  = useSlipSim ? _pts - simSlipPts : _pts
+            _disp_pts  = useSlipSim ? (_is_win ? _pts - simSlipPts : _pts) : _pts
             _disp_pnl  = useSlipSim ? math.round(_disp_pts * fixedLot, 2) : _pnl
             _disp_sl   = useSlipSim ? (na(_sl) ? na : (_d == 1 ? _sl + simSlipPts : _sl - simSlipPts)) : _sl
             _win  = useSlipSim ? _disp_pts > 0 : (_st == "TP1 + TP2" or _st == "TP2 ✓")
@@ -602,7 +605,8 @@ if barstate.islast and showJournal
     for _rv = 0 to _visJN - 1
         _rv_pts = array.get(jPts, _rv)
         _rv_pnl = array.get(jPnl, _rv)
-        _sim_rv_pts = useSlipSim ? _rv_pts - simSlipPts : _rv_pts
+        // WIN: slip reduces pts. LOSS: pts unchanged (SL fixed from fill)
+        _sim_rv_pts = useSlipSim ? (_rv_pts > 0 ? _rv_pts - simSlipPts : _rv_pts) : _rv_pts
         _sim_rv_pnl = useSlipSim ? math.round(_sim_rv_pts * fixedLot, 2) : _rv_pnl
         _visJPts  += _sim_rv_pts
         _visJPnl  += _sim_rv_pnl
@@ -644,11 +648,12 @@ var table atTbl = table.new(position.bottom_left, 2, 9,
 
 if barstate.islast and showJournal
     // ── Sim-adjusted all-time stats ───────────────────────────────────────
-    // sim_pts is EXACT: every trade (win or loss) costs simSlipPts extra.
-    // sim_wins: a TP win remains a win only if original_pts > simSlipPts.
-    // In fixed SL/TP mode all wins = fixedTPpts, so threshold is exact.
-    // In dynamic mode this is a conservative estimate.
-    _sim_at_pts  = useSlipSim ? statPts - simSlipPts * statTrades : statPts
+    // Slippage only costs on WINNING trades:
+    //   WIN:  entered late → TP is further → net pts = fixedTPpts - simSlipPts
+    //   LOSS: SL is same fixed distance from fill → pts unchanged = -fixedSLpts
+    // Formula: sim_pts = statPts - statWins * simSlipPts
+    // sim_wins: TP still reachable if simSlipPts < fixedTPpts (burst moves 300-800pts)
+    _sim_at_pts  = useSlipSim ? statPts - statWins * simSlipPts : statPts
     _sim_at_wins = useSlipSim ? (simSlipPts < fixedTPpts ? statWins : 0) : statWins
 
     _disp_wins = _sim_at_wins
