@@ -17,6 +17,16 @@ useSimpleMode   = input.bool(true,  "⚡ Simple Mode (SL + TP2 only — no TP1 p
 usePrevCandleSL = input.bool(false, "📍 SL = Previous Candle Low/High (BUY→low[1], SELL→high[1])", group=grpCore)
 vsCooldown  = input.int(3,     "Cooldown bars after signal",         minval=0,  maxval=20,  group=grpCore)
 
+// ── Fixed SL/TP: override ATR-based levels with fixed point values ──
+// Mode A — useFixedSLTP ON  : SL = fixedSLpts, TP = fixedTPpts (both fixed)
+// Mode B — useFixedSLOnly ON : SL = fixedSLpts, TP = ATR-based dynamic (captures full burst)
+// Both OFF                   : original ATR-based SL and TP (unchanged)
+grpFixed      = "Fixed SL/TP (Test Mode)"
+useFixedSLTP  = input.bool(false, "Mode A — Fixed SL and TP (both fixed pts)", group=grpFixed)
+useFixedSLOnly = input.bool(false, "Mode B — Fixed SL only, TP stays dynamic (burst-based)", group=grpFixed)
+fixedSLpts    = input.float(200.0, "SL Distance (pts) — used in Mode A and B", minval=1, maxval=2000, step=1, group=grpFixed)
+fixedTPpts    = input.float(200.0, "TP Distance (pts) — used in Mode A only",  minval=10, maxval=5000, step=10, group=grpFixed)
+
 grpFilt = "Filters"
 useEmaFilt  = input.bool(false, "EMA Direction Filter (3m 200)",  group=grpFilt)
 emaLen      = input.int(200,    "EMA Length", minval=20, maxval=500, group=grpFilt)
@@ -236,10 +246,11 @@ if volSurgeLong
     deleteLines()
     tDir        := 1
     tEntry      := close
-    tSLDist     := usePrevCandleSL ? (close - low[1])  : vsSLDist
-    tSL         := usePrevCandleSL ? low[1]             : (close - vsSLDist)
-    tTP1        := close + tSLDist * vsTP1R
-    tTP2        := close + tSLDist * vsTP2R
+    // Mode A: both fixed | Mode B: fixed SL, dynamic TP | default: fully ATR-based
+    tSLDist     := (useFixedSLTP or useFixedSLOnly) ? fixedSLpts : (usePrevCandleSL ? (close - low[1]) : vsSLDist)
+    tSL         := (useFixedSLTP or useFixedSLOnly) ? (close - fixedSLpts) : (usePrevCandleSL ? low[1] : (close - vsSLDist))
+    tTP1        := useFixedSLTP ? (close + fixedTPpts) : (close + vsSLDist * vsTP1R)
+    tTP2        := useFixedSLTP ? (close + fixedTPpts) : (close + vsSLDist * vsTP2R)
     tTP1Hit     := false
     tEntryT     := time        // burst bar fallback (overwritten on next bar by _needEntryT)
     tEntryBar   := bar_index   // lock out same-bar exits
@@ -267,10 +278,11 @@ if volSurgeShort
     deleteLines()
     tDir        := -1
     tEntry      := close
-    tSLDist     := usePrevCandleSL ? (high[1] - close) : vsSLDist
-    tSL         := usePrevCandleSL ? high[1]            : (close + vsSLDist)
-    tTP1        := close - tSLDist * vsTP1R
-    tTP2        := close - tSLDist * vsTP2R
+    // Mode A: both fixed | Mode B: fixed SL, dynamic TP | default: fully ATR-based
+    tSLDist     := (useFixedSLTP or useFixedSLOnly) ? fixedSLpts : (usePrevCandleSL ? (high[1] - close) : vsSLDist)
+    tSL         := (useFixedSLTP or useFixedSLOnly) ? (close + fixedSLpts) : (usePrevCandleSL ? high[1] : (close + vsSLDist))
+    tTP1        := useFixedSLTP ? (close - fixedTPpts) : (close - vsSLDist * vsTP1R)
+    tTP2        := useFixedSLTP ? (close - fixedTPpts) : (close - vsSLDist * vsTP2R)
     tTP1Hit     := false
     tEntryT     := time        // burst bar fallback (overwritten on next bar by _needEntryT)
     tEntryBar   := bar_index   // lock out same-bar exits

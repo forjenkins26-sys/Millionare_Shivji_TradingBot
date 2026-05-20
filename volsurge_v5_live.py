@@ -104,7 +104,7 @@ MAX_PRE_ENTRY_SLIP_PTS = float(os.getenv("MAX_PRE_ENTRY_SLIP_PTS", "0.0"))  # 0 
 FIXED_SL_PTS           = float(os.getenv("FIXED_SL_PTS", "0.0"))   # 0 = dynamic (default)
 FIXED_TP_PTS           = float(os.getenv("FIXED_TP_PTS", "0.0"))   # 0 = dynamic (default)
 
-PRICE_INTERVAL = 2   # seconds between position monitor ticks
+PRICE_INTERVAL = 1   # seconds between position monitor ticks (1s = ~4pt worst-case SL slippage vs 9pt at 2s)
 POS_MON_DELAY  = 3   # seconds to wait after entry before monitor starts
 
 # ════════════════════════════════════════════════════════════════════════
@@ -1149,6 +1149,16 @@ def _process_entry(
                 # Future-proof: if exchange SL ever gets placed, log it
                 _log(f"[SL] Exchange SL order placed oid={sl_oid} @ {sl_price}")
 
+            # TP placement failure alert — critical blind spot if TP order never reached Delta.
+            # Trade still runs (software SL protects it), but user must know immediately
+            # so they can manually place TP on Delta or decide to close.
+            if not tp_oid:
+                _loge(f"[TP] TP ORDER FAILED after {d} entry @ {fill_px} — no TP on Delta")
+                tg(f"⚠️ <b>TP ORDER FAILED</b> [{d}]\n"
+                   f"Entry: {fill_px:,.1f} | Expected TP: {tp_price:,.1f}\n"
+                   f"Trade is open — software SL @ {sl_price:,.1f} still active\n"
+                   f"Action: manually place SELL limit @ {tp_price:,.1f} on Delta or close trade")
+
             # Write latency CSV immediately (crash-safe)
             try:
                 _sig_lat = round((recv_time - pine_signal_time / 1000) * 1000, 1) if pine_signal_time else ""
@@ -1582,6 +1592,12 @@ async def _feed_watchdog():
                 tg(f"⚠️ Vol Surge v5: No candle received for {age/60:.1f}min — stale feed")
         await asyncio.sleep(300)
 
+
+@app.head("/health")
+@app.head("/")
+async def health_head():
+    """Lightweight HEAD ping for UptimeRobot free plan."""
+    return JSONResponse(content={}, status_code=200)
 
 @app.get("/")
 @app.get("/health")
