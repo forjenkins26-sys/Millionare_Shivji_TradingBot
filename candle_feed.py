@@ -23,6 +23,7 @@ Usage:
 import asyncio
 import json
 import logging
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -98,6 +99,7 @@ class CandleFeed:
         self.buffer:     deque = deque(maxlen=buffer_size)
         self.mark_price: Optional[float] = None
         self.mark_price_updated_at: Optional[float] = None   # time.time() of last mark_price WS update
+        self.mark_price_event: threading.Event = threading.Event()  # set on every WS mark_price tick
         self.last_closed: Optional[Candle] = None
         self.connected:  bool = False
 
@@ -417,6 +419,7 @@ class CandleFeed:
             if price:
                 self.mark_price            = float(price)
                 self.mark_price_updated_at = time.time()
+                self.mark_price_event.set()   # wake position monitor immediately
         except Exception as e:
             self.log.debug(f"[FEED] mark_price error: {e}")
 

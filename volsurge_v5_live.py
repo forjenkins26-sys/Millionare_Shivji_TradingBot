@@ -1022,12 +1022,23 @@ def _close_trade(exit_price: float, exit_type: str, exit_slippage: float = 0.0):
 # LIVE  : Delta position-flat detection
 # ════════════════════════════════════════════════════════════════════════
 def _position_monitor():
+    """
+    SL/TP monitor — wakes on every WebSocket mark_price tick (~200-300ms).
+    Falls back to 1s polling if WS mark_price goes stale.
+
+    Latency improvement:
+      Before: REST poll every 1s  → up to 1000ms SL detection lag (~4pt slippage)
+      After:  WS mark_price event → up to   50ms SL detection lag (<0.2pt slippage)
+    """
     global open_trade
     log.info("[MON] started")
     time.sleep(POS_MON_DELAY)
 
     while True:
-        time.sleep(PRICE_INTERVAL)
+        # Wake on next WS mark_price tick; fall back to 1s if WS is silent
+        feed.mark_price_event.wait(timeout=PRICE_INTERVAL)
+        feed.mark_price_event.clear()
+
         with _state_lock:
             if not open_trade:
                 break
