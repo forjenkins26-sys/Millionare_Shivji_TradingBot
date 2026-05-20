@@ -643,20 +643,16 @@ var table atTbl = table.new(position.bottom_left, 2, 9,
   frame_color=color.new(#555555,0), frame_width=1)
 
 if barstate.islast and showJournal
-    // ── Sim-adjusted all-time stats: iterate all journal trades ──────────
-    _sim_at_wins = 0
-    _sim_at_pts  = 0.0
-    _at_n = array.size(jPts)
-    if useSlipSim and _at_n > 0
-        for _i = 0 to _at_n - 1
-            _op = array.get(jPts, _i)
-            _sp = _op - simSlipPts
-            _sim_at_pts += _sp
-            if _sp > 0
-                _sim_at_wins += 1
+    // ── Sim-adjusted all-time stats ───────────────────────────────────────
+    // sim_pts is EXACT: every trade (win or loss) costs simSlipPts extra.
+    // sim_wins: a TP win remains a win only if original_pts > simSlipPts.
+    // In fixed SL/TP mode all wins = fixedTPpts, so threshold is exact.
+    // In dynamic mode this is a conservative estimate.
+    _sim_at_pts  = useSlipSim ? statPts - simSlipPts * statTrades : statPts
+    _sim_at_wins = useSlipSim ? (simSlipPts < fixedTPpts ? statWins : 0) : statWins
 
-    _disp_wins = useSlipSim ? _sim_at_wins : statWins
-    _disp_pts  = useSlipSim ? _sim_at_pts  : statPts
+    _disp_wins = _sim_at_wins
+    _disp_pts  = _sim_at_pts
     _disp_pnl  = useSlipSim ? math.round(_sim_at_pts * fixedLot, 2) : statPnl
     _disp_bal  = useSlipSim ? startBal + _disp_pnl : balance
 
