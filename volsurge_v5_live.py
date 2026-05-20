@@ -98,7 +98,8 @@ USE_HA        = os.getenv("USE_HA_CANDLES", "true").lower() == "true"
 # ── Trade parameters ──────────────────────────────────────────────────
 # TP_R: must match Pine's vsTP2R (currently 1.4R)
 TP_R               = float(os.getenv("TP_R", "1.4"))
-MAX_SLIPPAGE_RATIO = float(os.getenv("MAX_SLIPPAGE_RATIO", "0.0"))
+MAX_SLIPPAGE_RATIO     = float(os.getenv("MAX_SLIPPAGE_RATIO", "0.0"))
+MAX_PRE_ENTRY_SLIP_PTS = float(os.getenv("MAX_PRE_ENTRY_SLIP_PTS", "0.0"))  # 0 = disabled
 
 PRICE_INTERVAL = 1   # seconds between position monitor ticks (1s = ~4pt worst-case SL slippage vs 9pt at 2s)
 POS_MON_DELAY  = 3   # seconds to wait after entry before monitor starts
@@ -1042,6 +1043,24 @@ def _process_entry(
         else:
             side            = "buy" if d == "BUY" else "sell"
             entry_contracts = _btc_to_contracts(LOT_SIZE, pine_entry_px)
+
+            # ── Pre-entry price guard ─────────────────────────────────────
+            # Skip entry if price has already moved too far from signal price
+            # before we even place the order. Uses cached WS price (no REST call).
+            if MAX_PRE_ENTRY_SLIP_PTS > 0:
+                _cur_px = fetch_price()
+                if _cur_px:
+                    _pre_slip = (_cur_px - pine_entry_px) if d == "BUY" else (pine_entry_px - _cur_px)
+                    if _pre_slip > MAX_PRE_ENTRY_SLIP_PTS:
+                        _logw(f"ENTRY SKIPPED [PRE-GUARD] price moved {_pre_slip:+.1f}pts before order | signal={pine_entry_px:,.1f} now={_cur_px:,.1f}")
+                        tg(
+                            f"⏭ <b>ENTRY SKIPPED [{d}]</b>\n"
+                            f"Price moved <b>{_pre_slip:+.1f}pts</b> before order placed\n"
+                            f"Signal: {pine_entry_px:,.1f} | Now: {_cur_px:,.1f}\n"
+                            f"Max allowed: {MAX_PRE_ENTRY_SLIP_PTS:.0f}pts — skipping to protect R:R"
+                        )
+                        return
+
             _log_lifecycle(trade_id, "ENTRY_SENT", side=side, qty=entry_contracts,
                            price=pine_entry_px, notes=f"contracts={entry_contracts}")
             result = place_market_order(side, LOT_SIZE, ref_price=pine_entry_px)
@@ -1056,13 +1075,17 @@ def _process_entry(
             api_ack_time     = result.get("api_ack_time")
             fill_px          = result.get("fill_price")
 
+            # ── Fill price fallback: fast polling instead of 1.5s sleep ──
             if not fill_px:
-                time.sleep(1.5)
-                pos = get_open_position()
-                if pos and pos is not _POS_API_ERROR:
-                    fill_px = float(pos.get("entry_price", pine_entry_px))
-                else:
-                    fill_px = pine_entry_px
+                for _poll in range(5):
+                    time.sleep(0.25)
+                    pos = get_open_position()
+                    if pos and pos is not _POS_API_ERROR:
+                        fill_px = float(pos.get("entry_price", 0)) or None
+                        if fill_px:
+                            break
+                if not fill_px:
+                    fill_px = fetch_price() or pine_entry_px
             fill_px = round(fill_px, 1)
 
             # Fill-based SL/TP
@@ -1083,8 +1106,15 @@ def _process_entry(
                 sl_price = round(_mark - _sl_buffer, 1)
                 _logw(f"SL stop price adjusted to {sl_price} (below mark {_mark}) to avoid rejection")
 
-            sl_result = place_sl_order(close_side, LOT_SIZE, sl_price, contracts=entry_contracts)
-            tp_result = place_tp_order(close_side, LOT_SIZE, tp_price, contracts=entry_contracts)
+            # ── Parallel SL + TP placement ────────────────────────────────
+            # SL is a no-op (software monitor), TP is the only real REST call.
+            # Run both in threads so TP placement doesn't block state saving.
+            import concurrent.futures as _cf
+            with _cf.ThreadPoolExecutor(max_workers=2) as _pool:
+                _sl_fut = _pool.submit(place_sl_order, close_side, LOT_SIZE, sl_price, entry_contracts)
+                _tp_fut = _pool.submit(place_tp_order, close_side, LOT_SIZE, tp_price, entry_contracts)
+                sl_result = _sl_fut.result()
+                tp_result = _tp_fut.result()
 
             sl_oid      = sl_result["order_id"]   if sl_result else None
             sl_placed_t = sl_result["placed_time"] if sl_result else None
