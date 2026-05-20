@@ -1585,11 +1585,11 @@ async def _feed_watchdog():
         elif not feed.is_ready:
             log.warning("[WATCHDOG] Feed not ready — buffer thin")
         elif feed.last_closed:
-            # Measure from bar CLOSE (ts + 900), not bar START (ts)
-            # A 15m bar starts 900s before it closes — using ts directly
-            # makes age=15min immediately after close, causing false alarms.
-            age = time.time() - (feed.last_closed.ts + 900)
-            if age > 1800:   # no bar closed in last 30min (2× 15m bars)
+            # Measure from bar CLOSE (ts + 300), not bar START (ts)
+            # A 5m bar starts 300s before it closes — using ts directly
+            # makes age=5min immediately after close, causing false alarms.
+            age = time.time() - (feed.last_closed.ts + 300)
+            if age > 600:   # no bar closed in last 10min (2× 5m bars)
                 # Guard against false alarms at startup:
                 # Delta's REST backfill can lag 10-20min — last_closed may be
                 # old even though the WebSocket is live and receiving frames.
