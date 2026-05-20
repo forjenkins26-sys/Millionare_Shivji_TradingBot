@@ -99,7 +99,10 @@ USE_HA        = os.getenv("USE_HA_CANDLES", "true").lower() == "true"
 # TP_R: must match Pine's vsTP2R (currently 1.4R)
 TP_R                   = float(os.getenv("TP_R", "1.4"))
 MAX_SLIPPAGE_RATIO     = float(os.getenv("MAX_SLIPPAGE_RATIO", "0.0"))
-MAX_PRE_ENTRY_SLIP_PTS = float(os.getenv("MAX_PRE_ENTRY_SLIP_PTS", "0.0"))  # 0 = disabled
+MAX_PRE_ENTRY_SLIP_PTS = float(os.getenv("MAX_PRE_ENTRY_SLIP_PTS", "0.0"))  # legacy — superseded by limit entry
+# Limit entry — GTC limit at signal close price; waits for post-burst pullback
+ENTRY_LIMIT_TIMEOUT_S  = int(os.getenv("ENTRY_LIMIT_TIMEOUT_S",  "90"))   # 5m: 90s (≈ ½ bar); cancel if not filled
+ENTRY_LIMIT_MAX_DRIFT  = float(os.getenv("ENTRY_LIMIT_MAX_DRIFT", "0.0")) # 0 = auto (1.5 × sl_dist); cancel if price runs this far
 # Fixed SL/TP override — set both > 0 to use fixed pts instead of ATR-based
 FIXED_SL_PTS           = float(os.getenv("FIXED_SL_PTS", "0.0"))   # 0 = dynamic (default)
 FIXED_TP_PTS           = float(os.getenv("FIXED_TP_PTS", "0.0"))   # 0 = dynamic (default)
@@ -474,6 +477,132 @@ def place_market_order(side: str, size: float, reduce_only: bool = False,
     err_code = resp.get("error", resp.get("message", str(resp)[:300]))
     _loge(f"market order rejected | state={status} | code={err_code}")
     place_market_order._last_error = str(err_code)
+    return None
+
+def place_limit_entry_order(
+    side: str,
+    size: float,
+    limit_price: float,
+    sl_dist: float = 0.0,
+) -> Optional[dict]:
+    """
+    GTC limit entry at signal close price — the professional fix for burst-candle strategies.
+
+    Why market orders fail on burst signals:
+      The signal bar IS the burst. By the time bar closes + bot processes + order is placed
+      (~300-700ms), price has already moved 50-200pts in the breakout direction.
+      A market order here = terrible R:R. Pre-entry guard = missed trades.
+
+    This approach:
+      1. Places a GTC limit BUY at signal_close (or SELL at signal_close)
+      2. Post-burst pullbacks happen naturally as traders take profits (~30-90s)
+      3. If price retraces to limit → filled at exact signal price, perfect R:R
+      4. If price runs away → order cancelled, trade skipped (R:R protected)
+
+    Cancel conditions:
+      - Timeout: not filled within ENTRY_LIMIT_TIMEOUT_S seconds
+      - Drift: price moves ENTRY_LIMIT_MAX_DRIFT pts away without filling
+
+    Returns:
+        dict  — {order_id, fill_price, api_request_time, api_ack_time} on fill
+        None  — not filled (order cancelled — timeout or drift)
+    """
+    sz = _btc_to_contracts(size, limit_price)
+    body = {
+        "product_id":    PRODUCT_ID,
+        "size":          sz,
+        "side":          side.lower(),
+        "order_type":    "limit_order",
+        "limit_price":   str(round(limit_price, 1)),
+        "time_in_force": "gtc",
+        "reduce_only":   False,
+    }
+    api_req_t = time.time()
+    resp      = _post("/v2/orders", body)
+    api_ack_t = time.time()
+
+    if not resp:
+        return None
+    result   = resp.get("result", {})
+    order_id = str(result.get("id", ""))
+    if not order_id:
+        _loge(f"[LIMIT_ENTRY] No order_id in response: {resp}")
+        return None
+
+    # Auto drift threshold: 1.5× sl_dist, floor at 150pts
+    max_drift = (ENTRY_LIMIT_MAX_DRIFT if ENTRY_LIMIT_MAX_DRIFT > 0
+                 else max(sl_dist * 1.5, 150.0) if sl_dist > 0
+                 else 150.0)
+
+    log.info(
+        f"[LIMIT_ENTRY] Placed {side.upper()} limit @ {limit_price:.1f} "
+        f"oid={order_id} timeout={ENTRY_LIMIT_TIMEOUT_S}s max_drift={max_drift:.0f}pts"
+    )
+    tg(
+        f"⏳ <b>LIMIT ENTRY [{side.upper()}]</b>\n"
+        f"Limit: <b>{limit_price:,.1f}</b>\n"
+        f"Waiting up to {ENTRY_LIMIT_TIMEOUT_S}s for pullback fill..."
+    )
+
+    deadline = time.time() + ENTRY_LIMIT_TIMEOUT_S
+
+    while time.time() < deadline:
+        time.sleep(2.0)
+
+        order_resp = _get(f"/v2/orders/{order_id}")
+        if not order_resp:
+            continue
+
+        r     = order_resp.get("result", {})
+        state = r.get("state", "")
+
+        if state in ("filled", "closed"):
+            raw_fill = r.get("average_fill_price") or r.get("limit_price")
+            fill_px  = round(float(raw_fill), 1) if raw_fill else limit_price
+            log.info(f"[LIMIT_ENTRY] ✅ FILLED @ {fill_px:.1f} (limit={limit_price:.1f} slip={fill_px - limit_price:+.1f}pts)")
+            return {
+                "order_id":         order_id,
+                "fill_price":       fill_px,
+                "api_request_time": api_req_t,
+                "api_ack_time":     api_ack_t,
+            }
+
+        if state in ("cancelled", "rejected"):
+            log.warning(f"[LIMIT_ENTRY] Order {order_id} was {state} externally — aborting entry")
+            return None
+
+        # Drift check — cancel if price runs too far without filling
+        cur_price = fetch_price()
+        if cur_price:
+            # BUY limit: drift = price running UP above limit (good direction but no pullback)
+            # SELL limit: drift = price running DOWN below limit (good direction but no pullback)
+            drift     = (cur_price - limit_price) if side.lower() == "buy" else (limit_price - cur_price)
+            remaining = round(deadline - time.time(), 0)
+            log.debug(
+                f"[LIMIT_ENTRY] waiting | cur={cur_price:.1f} "
+                f"drift={drift:+.1f}pts remaining={remaining:.0f}s state={state}"
+            )
+            if drift > max_drift:
+                _delete(f"/v2/orders/{order_id}")
+                log.warning(
+                    f"[LIMIT_ENTRY] Price drifted {drift:.0f}pts > {max_drift:.0f}pts — cancelling"
+                )
+                tg(
+                    f"⏭ <b>LIMIT ENTRY cancelled [{side.upper()}]</b>\n"
+                    f"Price ran <b>{drift:.0f}pts</b> without pullback\n"
+                    f"Signal: {limit_price:,.1f} | Now: {cur_price:,.1f}\n"
+                    f"Trade skipped — R:R protected"
+                )
+                return None
+
+    # Timeout — cancel order
+    _delete(f"/v2/orders/{order_id}")
+    log.warning(f"[LIMIT_ENTRY] Timeout ({ENTRY_LIMIT_TIMEOUT_S}s) — no pullback fill, trade skipped")
+    tg(
+        f"⏭ <b>LIMIT ENTRY timeout [{side.upper()}]</b>\n"
+        f"No pullback within {ENTRY_LIMIT_TIMEOUT_S}s — price ran without retracing\n"
+        f"Trade skipped — R:R protected"
+    )
     return None
 
 def place_sl_order(close_side: str, size: float, sl_price: float,
@@ -1059,22 +1188,29 @@ def _process_entry(
             side            = "buy" if d == "BUY" else "sell"
             entry_contracts = _btc_to_contracts(LOT_SIZE, pine_entry_px)
 
-            # ── Pre-entry price guard ─────────────────────────────────────
-            # Skip entry if price already moved too far from signal price.
-            # Uses cached WS mark price — no REST call, near-zero latency.
-            if MAX_PRE_ENTRY_SLIP_PTS > 0:
-                _cur_px = fetch_price()
-                if _cur_px:
-                    _pre_slip = (_cur_px - pine_entry_px) if d == "BUY" else (pine_entry_px - _cur_px)
-                    if _pre_slip > MAX_PRE_ENTRY_SLIP_PTS:
-                        _logw(f"ENTRY SKIPPED [PRE-GUARD] price moved {_pre_slip:+.1f}pts | signal={pine_entry_px:,.1f} now={_cur_px:,.1f}")
-                        tg(
-                            f"⏭ <b>ENTRY SKIPPED [{d}]</b>\n"
-                            f"Price moved <b>{_pre_slip:+.1f}pts</b> before order placed\n"
-                            f"Signal: {pine_entry_px:,.1f} | Now: {_cur_px:,.1f}\n"
-                            f"Max allowed: {MAX_PRE_ENTRY_SLIP_PTS:.0f}pts — skipping to protect R:R"
-                        )
-                        return
+            # ── Pre-entry price guard (dynamic) ──────────────────────────
+            # For momentum/burst strategies, SL/TP are anchored to FILL price
+            # (not signal price), so entering late still preserves R:R.
+            # Guard only blocks entries where slippage > 1× sl_dist — i.e.,
+            # price has already moved a full SL distance, making the trade
+            # structurally broken (you'd be entering at the SL level of the signal).
+            # Fixed guard (MAX_PRE_ENTRY_SLIP_PTS > 0) overrides this if set.
+            _cur_px = fetch_price()
+            if _cur_px:
+                _pre_slip = (_cur_px - pine_entry_px) if d == "BUY" else (pine_entry_px - _cur_px)
+                if MAX_PRE_ENTRY_SLIP_PTS > 0:
+                    _guard = MAX_PRE_ENTRY_SLIP_PTS          # legacy fixed override
+                else:
+                    _guard = sl_dist * 1.0                   # dynamic: 1× sl_dist
+                if _pre_slip > _guard:
+                    _logw(f"ENTRY SKIPPED [PRE-GUARD] price moved {_pre_slip:+.1f}pts > {_guard:.0f}pt guard | signal={pine_entry_px:,.1f} now={_cur_px:,.1f}")
+                    tg(
+                        f"⏭ <b>ENTRY SKIPPED [{d}]</b>\n"
+                        f"Price moved <b>{_pre_slip:+.1f}pts</b> — exceeds 1× sl_dist ({_guard:.0f}pts)\n"
+                        f"Signal: {pine_entry_px:,.1f} | Now: {_cur_px:,.1f}\n"
+                        f"Entry would be at SL level of signal — skipping"
+                    )
+                    return
 
             _log_lifecycle(trade_id, "ENTRY_SENT", side=side, qty=entry_contracts,
                            price=pine_entry_px, notes=f"contracts={entry_contracts}")
@@ -1091,7 +1227,6 @@ def _process_entry(
             fill_px          = result.get("fill_price")
 
             # ── Fill price fallback: fast polling instead of 1.5s sleep ──
-            # First poll at 100ms (not 250ms) — IOC market orders usually settle fast
             if not fill_px:
                 for _pw in (0.10, 0.15, 0.20, 0.25, 0.25):
                     time.sleep(_pw)
@@ -1801,8 +1936,17 @@ async def test_close(confirm: str = ""):
             price = round(float(close_fill), 1)
             log.info(f"[CLOSE] Market close filled @ {price}")
         else:
-            log.error("[CLOSE] Market close order FAILED — position may still be open on Delta")
-            tg(f"⚠️ TEST CLOSE FAILED — position still open on Delta! Close manually.")
+            # ── CRITICAL: close order failed — do NOT clear open_trade ─────────
+            # Returning success here would desync bot state from Delta Exchange.
+            # Keep open_trade intact so the position monitor can still manage it.
+            err = getattr(place_market_order, "_last_error", "unknown")
+            log.error(f"[CLOSE] Market close order FAILED — keeping open_trade intact | Delta: {err}")
+            tg(f"⚠️ TEST CLOSE FAILED — position still open on Delta!\nClose manually on Delta Exchange.\nDelta error: {err}")
+            return JSONResponse(
+                {"error": "Market close order FAILED — position still open on Delta. Close manually.",
+                 "delta_error": err},
+                status_code=500
+            )
 
     with _state_lock:
         if open_trade:
