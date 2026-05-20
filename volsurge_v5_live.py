@@ -343,12 +343,19 @@ def _sign(method: str, path: str, qs: str = "", body: str = "") -> dict:
     ).hexdigest()
     return {"api-key": API_KEY, "timestamp": ts, "signature": sig, "Content-Type": "application/json"}
 
+# Persistent HTTP session — reuses TCP+TLS connection across all API calls.
+# Eliminates 50-100ms handshake overhead per request (critical for entry latency).
+_http = requests.Session()
+_http.mount("https://", requests.adapters.HTTPAdapter(
+    pool_connections=2, pool_maxsize=4, max_retries=0
+))
+
 def _get(path: str, params: Optional[dict] = None):
     qs = ""
     if params:
         qs = "?" + "&".join(f"{k}={v}" for k, v in params.items())
     try:
-        r = requests.get(BASE_URL + path + qs, headers=_sign("GET", path, qs), timeout=10)
+        r = _http.get(BASE_URL + path + qs, headers=_sign("GET", path, qs), timeout=10)
         if r.status_code != 200:
             _loge(f"GET {path} HTTP {r.status_code} | {r.text[:300]}")
         return r.json()
@@ -359,7 +366,7 @@ def _get(path: str, params: Optional[dict] = None):
 def _post(path: str, body_dict: dict):
     body = json.dumps(body_dict)
     try:
-        r = requests.post(BASE_URL + path, headers=_sign("POST", path, "", body), data=body, timeout=10)
+        r = _http.post(BASE_URL + path, headers=_sign("POST", path, "", body), data=body, timeout=10)
         return r.json()
     except Exception as e:
         _loge(f"POST {path} error: {e}")
