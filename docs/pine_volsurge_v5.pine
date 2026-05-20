@@ -657,8 +657,10 @@ if barstate.islast and showJournal
     _abalCol  = balance >= startBal ? color.new(#26a69a,0) : color.new(#f23645,0)
     _aretCol  = _aret >= 0 ? color.new(#26a69a,0) : color.new(#f23645,0)
 
-    table.cell(atTbl, 0, 0, "ALL-TIME STATS",  text_color=_ahfg, text_size=_ass, bgcolor=_ahbg)
-    table.cell(atTbl, 1, 0, str.tostring(statTrades) + " total trades", text_color=_amc, text_size=_ass, bgcolor=_ahbg)
+    _atTitle = useSlipSim ? "ALL-TIME (original)" : "ALL-TIME STATS"
+    _atSubtitle = useSlipSim ? str.tostring(statTrades) + " trades (no sim)" : str.tostring(statTrades) + " total trades"
+    table.cell(atTbl, 0, 0, _atTitle,     text_color=_ahfg, text_size=_ass, bgcolor=_ahbg)
+    table.cell(atTbl, 1, 0, _atSubtitle,  text_color=_amc,  text_size=_ass, bgcolor=_ahbg)
     table.cell(atTbl, 0, 1, "Win Rate",         text_color=_amc,  text_size=_ass, bgcolor=_asbg)
     table.cell(atTbl, 1, 1, str.tostring(_awt) + "% (" + str.tostring(statWins) + "/" + str.tostring(statTrades) + ")", text_color=_awrCol, text_size=_ass, bgcolor=_asbg)
     table.cell(atTbl, 0, 2, "Total Pts",        text_color=_amc,  text_size=_ass, bgcolor=_asbg)
