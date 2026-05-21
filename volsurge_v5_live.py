@@ -2468,7 +2468,7 @@ async def dashboard():
   .hidden{{display:none}}
 </style>
 <script>
-  setTimeout(()=>location.reload(),5000);
+  setTimeout(()=>location.reload(),3000);
   setInterval(()=>{{document.getElementById('clk').textContent=new Date().toLocaleTimeString('en-IN',{{timeZone:'Asia/Kolkata'}})}},1000);
   window.onload=()=>document.getElementById('clk').textContent=new Date().toLocaleTimeString('en-IN',{{timeZone:'Asia/Kolkata'}});
 
@@ -2675,7 +2675,7 @@ async def dashboard():
 <div class="hdr">
   <div>
     <h1>⚡ Vol Surge v5 — Live Dashboard</h1>
-    <div style="color:#6b7280;font-size:11px;margin-top:3px;">BTCUSD · Delta Exchange India · WebSocket-native · auto-refresh 15s · {now_ist}</div>
+    <div style="color:#6b7280;font-size:11px;margin-top:3px;">BTCUSD · Delta Exchange India · <span style="color:#4ade80;font-weight:600;">5m candles</span> · WebSocket-native · <span style="color:#4ade80;">live price 1s</span> · page reload 3s · {now_ist}</div>
   </div>
   <div style="text-align:right;display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
     <span style="background:{mode_bg};color:{mode_col};padding:4px 14px;border-radius:20px;font-size:12px;font-weight:700;">{mode_label}</span>
