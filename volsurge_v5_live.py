@@ -2236,12 +2236,12 @@ async def dashboard():
   </div>
   <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;">
     <div><div style="color:#6b7280;font-size:10px;text-transform:uppercase;">Fill Price</div><div style="color:#f9fafb;font-size:16px;font-weight:700;">{_f(fill_px)}</div></div>
-    <div><div style="color:#6b7280;font-size:10px;text-transform:uppercase;">Live Price</div><div style="color:#60a5fa;font-size:16px;font-weight:700;">{_f(live_px)}</div></div>
-    <div><div style="color:#6b7280;font-size:10px;text-transform:uppercase;">Unrealized</div><div style="color:{unreal_col};font-size:16px;font-weight:700;">{'+' if unreal>=0 else ''}{unreal:.1f} pts</div></div>
+    <div><div style="color:#6b7280;font-size:10px;text-transform:uppercase;">Live Price</div><div id="ot-live-px" style="color:#60a5fa;font-size:16px;font-weight:700;">{_f(live_px)}</div></div>
+    <div><div style="color:#6b7280;font-size:10px;text-transform:uppercase;">Unrealized</div><div id="ot-unreal" style="color:{unreal_col};font-size:16px;font-weight:700;">{'+' if unreal>=0 else ''}{unreal:.1f} pts</div></div>
     <div><div style="color:#6b7280;font-size:10px;text-transform:uppercase;">SL Level</div><div style="color:#f87171;font-size:16px;">{_f(sl_px)}</div></div>
     <div><div style="color:#6b7280;font-size:10px;text-transform:uppercase;">TP Level</div><div style="color:#4ade80;font-size:16px;">{_f(tp_px)}</div></div>
-    <div><div style="color:#6b7280;font-size:10px;text-transform:uppercase;">Dist to SL</div><div style="color:#f87171;font-size:14px;">{round(abs(live_px-sl_px),1) if live_px else '—'} pts</div></div>
-    <div><div style="color:#6b7280;font-size:10px;text-transform:uppercase;">Dist to TP</div><div style="color:#4ade80;font-size:14px;">{round(abs(tp_px-live_px),1) if live_px else '—'} pts</div></div>
+    <div><div style="color:#6b7280;font-size:10px;text-transform:uppercase;">Dist to SL</div><div id="ot-dist-sl" style="color:#f87171;font-size:14px;">{round(abs(live_px-sl_px),1) if live_px else '—'} pts</div></div>
+    <div><div style="color:#6b7280;font-size:10px;text-transform:uppercase;">Dist to TP</div><div id="ot-dist-tp" style="color:#4ade80;font-size:14px;">{round(abs(tp_px-live_px),1) if live_px else '—'} pts</div></div>
     <div>
       <div style="color:#6b7280;font-size:10px;text-transform:uppercase;">Entry Slippage</div>
       <div style="color:#facc15;font-size:16px;">{'+' if float(slip or 0)>=0 else ''}{float(slip or 0):.2f} pts</div>
@@ -2622,6 +2622,34 @@ async def dashboard():
   }}
 
   window.addEventListener('DOMContentLoaded', () => _applyPage());
+
+  // ── Live price polling (2s) — updates open trade panel without full reload ──
+  (function livePrice() {{
+    const elPx    = document.getElementById('ot-live-px');
+    const elUnr   = document.getElementById('ot-unreal');
+    const elDistSL= document.getElementById('ot-dist-sl');
+    const elDistTP= document.getElementById('ot-dist-tp');
+    if (!elPx) return;   // no open trade — don't poll
+    async function poll() {{
+      try {{
+        const j = await fetch('/status').then(r => r.json());
+        const px  = j.mark_price;
+        const unr = j.unrealised_pts;
+        const ot  = j.open_trade;
+        if (!px || !ot) return;
+        elPx.textContent = px.toLocaleString('en-US', {{minimumFractionDigits:1,maximumFractionDigits:1}});
+        if (unr !== null && unr !== undefined) {{
+          elUnr.textContent = (unr >= 0 ? '+' : '') + unr.toFixed(1) + ' pts';
+          elUnr.style.color = unr >= 0 ? '#4ade80' : '#f87171';
+        }}
+        const sl = ot.sl_price, tp = ot.tp_price;
+        if (sl) elDistSL.textContent = Math.abs(px - sl).toFixed(1) + ' pts';
+        if (tp) elDistTP.textContent = Math.abs(tp - px).toFixed(1) + ' pts';
+      }} catch(e) {{}}
+    }}
+    poll();
+    setInterval(poll, 2000);
+  }})();
 </script>
 </head>
 <body>
