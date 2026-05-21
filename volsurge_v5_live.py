@@ -1983,7 +1983,9 @@ async def purge_test_trades():
     try:
         with open(CSV_FILE, "r", encoding="utf-8") as f:
             rows = list(csv.DictReader(f))
-        genuine = [r for r in rows if r.get("exit_type", "") not in _TEST_EXIT_TYPES]
+        genuine = [r for r in rows
+                   if r.get("exit_type", "") not in _TEST_EXIT_TYPES
+                   and r.get("structure_grade", "") != "TEST"]
         removed = len(rows) - len(genuine)
         if removed > 0:
             with open(CSV_FILE, "w", newline="", encoding="utf-8") as f:
@@ -2009,10 +2011,13 @@ async def dashboard():
         pass
 
     # ── Filter: hide test entries from all stats and journal ─────────────────
-    # TEST_CLOSE = manual /test/close button; AUTO_EXIT = test fallback close.
-    # Keeps only genuine live exits: TP_LIVE, SL_LIVE, SL_SOFTWARE.
+    # structure_grade="TEST" → trade_id started with "TEST_" (test/fire endpoint).
+    # exit_type TEST_CLOSE/AUTO_EXIT → manual close or fallback exit.
+    # Both together cover every possible test entry regardless of how it exited.
     _TEST_EXIT_TYPES = {"TEST_CLOSE", "AUTO_EXIT"}
-    trades = [t for t in trades if t.get("exit_type", "") not in _TEST_EXIT_TYPES]
+    trades = [t for t in trades
+              if t.get("exit_type", "") not in _TEST_EXIT_TYPES
+              and t.get("structure_grade", "") != "TEST"]
 
     # ── Load lifecycle events (last 50) ───────────────────────────────────────
     lifecycle_rows = []
