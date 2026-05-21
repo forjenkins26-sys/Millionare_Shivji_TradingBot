@@ -2579,7 +2579,8 @@ async def dashboard():
   let _filter = 'all';
 
   function _visibleRows() {{
-    return Array.from(document.querySelectorAll('.trade-row')).filter(r => {{
+    const scope = document.getElementById('view-detailed');
+    return Array.from(scope ? scope.querySelectorAll('.trade-row') : []).filter(r => {{
       if (_filter === 'live') return r.dataset.tradetype !== 'test';
       if (_filter === 'test') return r.dataset.tradetype === 'test';
       return true;
@@ -2591,8 +2592,14 @@ async def dashboard():
     const total = rows.length;
     const pages = Math.max(1, Math.ceil(total / _PER_PAGE));
     if (_page > pages) _page = pages;
-    document.querySelectorAll('.trade-row').forEach(r => r.style.display = 'none');
-    rows.slice((_page-1)*_PER_PAGE, _page*_PER_PAGE).forEach(r => r.style.display = '');
+    const allRows = Array.from(document.querySelectorAll('.trade-row'));
+    const detRows = allRows.filter(r => r.closest('#view-detailed'));
+    const tvRows  = allRows.filter(r => r.closest('#view-tv'));
+    detRows.forEach(r => r.style.display = 'none');
+    tvRows.forEach(r  => r.style.display = 'none');
+    const visIdx = new Set(rows.map(r => detRows.indexOf(r)));
+    detRows.forEach((r, i) => {{ if (visIdx.has(i) && i >= (_page-1)*_PER_PAGE && i < _page*_PER_PAGE) r.style.display = ''; }});
+    tvRows.forEach((r,  i) => {{ if (visIdx.has(i) && i >= (_page-1)*_PER_PAGE && i < _page*_PER_PAGE) r.style.display = ''; }});
     const info = document.getElementById('page-info');
     const btnP = document.getElementById('btn-prev-page');
     const btnN = document.getElementById('btn-next-page');
