@@ -1237,17 +1237,32 @@ def _process_entry(
             api_ack_time     = result.get("api_ack_time")
             fill_px          = result.get("fill_price")
 
-            # ── Fill price fallback: fast polling instead of 1.5s sleep ──
+            # ── Fill price fallback: 2-step fast query (replaces 950ms polling loop) ──
+            # IOC market orders fill immediately on Delta — one short wait + order fetch
+            # is enough. Fallback to position query, then mark_price.
             if not fill_px:
-                for _pw in (0.10, 0.15, 0.20, 0.25, 0.25):
-                    time.sleep(_pw)
-                    pos = get_open_position()
-                    if pos and pos is not _POS_API_ERROR:
-                        fill_px = float(pos.get("entry_price", 0)) or None
-                        if fill_px:
-                            break
-                if not fill_px:
-                    fill_px = fetch_price() or pine_entry_px
+                # Step 1: 80ms wait → fetch order directly (fastest path)
+                time.sleep(0.08)
+                if entry_order_id:
+                    try:
+                        _ord_r = _get(f"/v2/orders/{entry_order_id}")
+                        if _ord_r:
+                            _avg = (_ord_r.get("result", {}).get("average_fill_price")
+                                    or _ord_r.get("result", {}).get("limit_price"))
+                            if _avg:
+                                fill_px = round(float(_avg), 1)
+                                log.info(f"[FILL] Order query fill: {fill_px}")
+                    except Exception as _fe:
+                        log.debug(f"[FILL] Order query failed: {_fe}")
+            if not fill_px:
+                # Step 2: 100ms wait → position fallback
+                time.sleep(0.10)
+                pos = get_open_position()
+                if pos and pos is not _POS_API_ERROR:
+                    fill_px = float(pos.get("entry_price", 0)) or None
+            if not fill_px:
+                # Step 3: mark_price (already in memory via WS — 0ms)
+                fill_px = feed.mark_price or fetch_price() or pine_entry_px
             fill_px = round(fill_px, 1)
 
             # ── Fixed SL/TP override ──────────────────────────────────────
