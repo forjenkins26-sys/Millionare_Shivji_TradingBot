@@ -96,8 +96,8 @@ SAFETY_FACTOR = float(os.getenv("SIGNAL_SAFETY_FACTOR", "1.0"))
 USE_HA        = os.getenv("USE_HA_CANDLES", "true").lower() == "true"
 
 # ── Trade parameters ──────────────────────────────────────────────────
-# TP_R: must match Pine's vsTP2R (currently 1.4R)
-TP_R                   = float(os.getenv("TP_R", "1.4"))
+# TP_R: must match Pine's vsTP2R (1.3R — signal-anchored TP)
+TP_R                   = float(os.getenv("TP_R", "1.3"))
 MAX_SLIPPAGE_RATIO     = float(os.getenv("MAX_SLIPPAGE_RATIO", "0.0"))
 MAX_PRE_ENTRY_SLIP_PTS = float(os.getenv("MAX_PRE_ENTRY_SLIP_PTS", "0.0"))  # legacy — superseded by limit entry
 # Limit entry — GTC limit at signal close price; waits for post-burst pullback
@@ -806,9 +806,14 @@ def _set_open_trade(
     global open_trade
     d = direction
 
-    # Fill-based SL/TP — anchored to actual Delta fill, not Pine signal price
+    # SL: fill-based (protects actual capital at risk)
     sl_price = round(fill_price - sl_dist, 1) if d == "BUY" else round(fill_price + sl_dist, 1)
-    tp_price = round(fill_price + sl_dist * TP_R, 1) if d == "BUY" else round(fill_price - sl_dist * TP_R, 1)
+    # TP: signal-based (Pine parity — anchored to bar close, not fill price)
+    # Fallback to fill-based if fill already past pine_tp (extreme slippage edge case)
+    if (d == "BUY" and fill_price >= pine_tp) or (d == "SELL" and fill_price <= pine_tp):
+        tp_price = round(fill_price + sl_dist * TP_R, 1) if d == "BUY" else round(fill_price - sl_dist * TP_R, 1)
+    else:
+        tp_price = pine_tp
 
     entry_slippage   = round(fill_price - pine_entry_px, 2) if d == "BUY" else round(pine_entry_px - fill_price, 2)
     # signal_latency_ms: time from bar close to when engine detected it (should be <500ms)
@@ -1275,10 +1280,18 @@ def _process_entry(
                 _log(f"[FIXED SL] Overriding sl_dist → {sl_dist:.0f}pts")
             _tp_pts = FIXED_TP_PTS if FIXED_TP_PTS > 0 else sl_dist * TP_R
 
-            # Fill-based SL/TP
             close_side = "sell" if d == "BUY" else "buy"
+            # SL: fill-based (protects actual capital at risk)
             sl_price   = round(fill_px - sl_dist, 1) if d == "BUY" else round(fill_px + sl_dist, 1)
-            tp_price   = round(fill_px + _tp_pts,  1) if d == "BUY" else round(fill_px - _tp_pts,  1)
+            # TP: signal-based (Pine parity) — anchor to pine_entry_px, not fill price
+            # Fallback to fill-based if: (a) FIXED_TP_PTS set, or (b) fill already past pine TP
+            if FIXED_TP_PTS > 0:
+                tp_price = round(fill_px + _tp_pts, 1) if d == "BUY" else round(fill_px - _tp_pts, 1)
+            elif (d == "BUY" and fill_px >= pine_tp) or (d == "SELL" and fill_px <= pine_tp):
+                tp_price = round(fill_px + _tp_pts, 1) if d == "BUY" else round(fill_px - _tp_pts, 1)
+                _logw(f"[TP] Fill {fill_px} past pine_tp {pine_tp} — fill-based TP: {tp_price}")
+            else:
+                tp_price = pine_tp
 
             # For stop orders, Delta requires stop_price to be away from mark price.
             # BUY stop (close SELL): stop_price must be ABOVE mark price.
