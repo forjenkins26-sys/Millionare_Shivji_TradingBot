@@ -2004,6 +2004,25 @@ async def test_telegram():
     return JSONResponse({"status": "sent"})
 
 
+# ── /api/live — fast memory-only endpoint for 1s dashboard polling ────────────
+@app.get("/api/live")
+async def api_live():
+    with _state_lock:
+        trade_snap = dict(open_trade) if open_trade else None
+    px  = feed.mark_price
+    unr = None
+    if trade_snap and px:
+        d   = trade_snap["direction"]
+        unr = round((px - trade_snap["fill_price"]) if d == "BUY"
+                    else (trade_snap["fill_price"] - px), 2)
+    return JSONResponse({
+        "price": px,
+        "unreal": unr,
+        "sl": trade_snap.get("sl_price") if trade_snap else None,
+        "tp": trade_snap.get("tp_price") if trade_snap else None,
+    })
+
+
 # ── /admin/purge-test-trades ──────────────────────────────────────────────────
 @app.get("/admin/purge-test-trades")
 async def purge_test_trades():
@@ -2040,14 +2059,8 @@ async def dashboard():
     except Exception:
         pass
 
-    # ── Filter: hide test entries from all stats and journal ─────────────────
-    # structure_grade="TEST" → trade_id started with "TEST_" (test/fire endpoint).
-    # exit_type TEST_CLOSE/AUTO_EXIT → manual close or fallback exit.
-    # Both together cover every possible test entry regardless of how it exited.
-    _TEST_EXIT_TYPES = {"TEST_CLOSE", "AUTO_EXIT"}
-    trades = [t for t in trades
-              if t.get("exit_type", "") not in _TEST_EXIT_TYPES
-              and t.get("structure_grade", "") != "TEST"]
+    # ── Keep all trades (test + live) — journal toggle handles filtering ────────
+    pass
 
     # ── Load lifecycle events (last 50) ───────────────────────────────────────
     lifecycle_rows = []
@@ -2455,7 +2468,7 @@ async def dashboard():
   .hidden{{display:none}}
 </style>
 <script>
-  setTimeout(()=>location.reload(),15000);
+  setTimeout(()=>location.reload(),5000);
   setInterval(()=>{{document.getElementById('clk').textContent=new Date().toLocaleTimeString('en-IN',{{timeZone:'Asia/Kolkata'}})}},1000);
   window.onload=()=>document.getElementById('clk').textContent=new Date().toLocaleTimeString('en-IN',{{timeZone:'Asia/Kolkata'}});
 
@@ -2623,32 +2636,29 @@ async def dashboard():
 
   window.addEventListener('DOMContentLoaded', () => _applyPage());
 
-  // ── Live price polling (2s) — updates open trade panel without full reload ──
+  // ── Live price polling (1s via /api/live — memory only, <1ms) ───────────────
   (function livePrice() {{
     const elPx    = document.getElementById('ot-live-px');
     const elUnr   = document.getElementById('ot-unreal');
     const elDistSL= document.getElementById('ot-dist-sl');
     const elDistTP= document.getElementById('ot-dist-tp');
-    if (!elPx) return;   // no open trade — don't poll
+    if (!elPx) return;
     async function poll() {{
       try {{
-        const j = await fetch('/status').then(r => r.json());
-        const px  = j.mark_price;
-        const unr = j.unrealised_pts;
-        const ot  = j.open_trade;
-        if (!px || !ot) return;
+        const j = await fetch('/api/live').then(r => r.json());
+        const px = j.price, unr = j.unreal, sl = j.sl, tp = j.tp;
+        if (!px) return;
         elPx.textContent = px.toLocaleString('en-US', {{minimumFractionDigits:1,maximumFractionDigits:1}});
         if (unr !== null && unr !== undefined) {{
           elUnr.textContent = (unr >= 0 ? '+' : '') + unr.toFixed(1) + ' pts';
           elUnr.style.color = unr >= 0 ? '#4ade80' : '#f87171';
         }}
-        const sl = ot.sl_price, tp = ot.tp_price;
         if (sl) elDistSL.textContent = Math.abs(px - sl).toFixed(1) + ' pts';
         if (tp) elDistTP.textContent = Math.abs(tp - px).toFixed(1) + ' pts';
       }} catch(e) {{}}
     }}
     poll();
-    setInterval(poll, 2000);
+    setInterval(poll, 1000);
   }})();
 </script>
 </head>
@@ -2687,34 +2697,56 @@ async def dashboard():
 </div>
 
 <script>
-  async function testFire(side) {{
-    const isLive = '{'' if PAPER_MODE else 'LIVE'}' === 'LIVE';
-    if (isLive) {{
-      const ok = confirm(`⚠️ LIVE MODE — This will place a REAL ${{side}} market order on Delta Exchange for {LOT_SIZE} BTC.\\n\\nSL and TP orders will also be placed automatically.\\n\\nProceed?`);
-      if (!ok) return;
-    }}
-    const url = isLive ? `/test/fire/${{side.toLowerCase()}}?confirm=yes` : `/test/fire/${{side.toLowerCase()}}`;
-    const r = await fetch(url);
-    const j = await r.json();
-    if (j.error) {{ alert('❌ Error: ' + j.error); return; }}
-    alert(`✅ Test ${{side}} fired!\\nEntry: ${{Number(j.price).toLocaleString()}}\\nSL: ${{j.sl}}\\nTP: ${{j.tp}}\\n\\n${{isLive ? "Check Delta Exchange for the 3 orders (entry + SL + TP)!" : "Paper fill simulated."}}\\n\\nRefreshing...`);
-    setTimeout(() => location.reload(), 2000);
+  // ── Custom modal ──────────────────────────────────────────────────────────
+  let _modalCb = null;
+  function _showModal(title, msg, yesLabel, yesColor, cb) {{
+    document.getElementById('modal-title').textContent  = title;
+    document.getElementById('modal-body').innerHTML     = msg;
+    document.getElementById('modal-yes').textContent    = yesLabel;
+    document.getElementById('modal-yes').style.background = yesColor;
+    document.getElementById('modal-overlay').style.display = 'flex';
+    _modalCb = cb;
   }}
+  function _modalYes()    {{ document.getElementById('modal-overlay').style.display='none'; if(_modalCb) _modalCb(true); }}
+  function _modalCancel() {{ document.getElementById('modal-overlay').style.display='none'; if(_modalCb) _modalCb(false); }}
+
+  const IS_LIVE = '{'' if PAPER_MODE else 'LIVE'}' === 'LIVE';
+
+  async function testFire(side) {{
+    const isBuy = side === 'BUY';
+    const title = IS_LIVE ? '⚠️ LIVE ORDER — ' + side : (isBuy ? '▲ Paper BUY' : '▼ Paper SELL');
+    const msg   = IS_LIVE
+      ? '<b style="color:#f87171">REAL order will be placed on Delta Exchange!</b><br><br>Symbol: BTCUSD &nbsp;·&nbsp; Lot: {LOT_SIZE} BTC<br>SL &amp; TP placed automatically.<br><br>Are you sure?'
+      : 'Place paper <b>' + side + '</b> at current mark price.<br>Lot: {LOT_SIZE} BTC &nbsp;·&nbsp; Mode: PAPER<br><br>Proceed?';
+    _showModal(title, msg, '✓ Yes, ' + side, isBuy ? '#166534' : '#7f1d1d', async (ok) => {{
+      if (!ok) return;
+      const url = IS_LIVE ? '/test/fire/' + side.toLowerCase() + '?confirm=yes' : '/test/fire/' + side.toLowerCase();
+      const r = await fetch(url);
+      const j = await r.json();
+      if (j.error) {{ _showModal('❌ Error', j.error, 'OK', '#374151', ()=>{{}}); return; }}
+      _showModal('✅ Trade Fired',
+        side + ' @ <b>' + Number(j.price).toLocaleString() + '</b><br>SL: ' + j.sl + ' &nbsp; TP: ' + j.tp
+        + (IS_LIVE ? '<br><br>Check Delta Exchange for orders.' : '<br><br>Paper fill simulated.'),
+        'OK', '#1d4ed8', () => location.reload());
+    }});
+  }}
+
   async function testClose() {{
-    const isLiveClose = '{'' if PAPER_MODE else 'LIVE'}' === 'LIVE';
-    const msg = isLiveClose
-      ? 'LIVE MODE: This will cancel your SL/TP orders and close the position on Delta Exchange.\\nContinue?'
-      : 'Close current open trade at live price?';
-    if (!confirm(msg)) return;
-    const url = isLiveClose ? '/test/close?confirm=yes' : '/test/close';
-    const r = await fetch(url);
-    const j = await r.json();
-    if (j.error) {{ alert('❌ Error: ' + j.error); return; }}
-    const closeMsg = isLiveClose
-      ? `✅ LIVE position closed @ ${{Number(j.exit_price).toLocaleString()}}\\nSL/TP orders cancelled + market close sent to Delta.\\nRefreshing...`
-      : `✅ Paper trade closed @ ${{Number(j.exit_price).toLocaleString()}}\\nRefreshing...`;
-    alert(closeMsg);
-    setTimeout(() => location.reload(), 1000);
+    const title = IS_LIVE ? '⚠️ LIVE CLOSE' : 'Close Paper Trade';
+    const msg   = IS_LIVE
+      ? '<b style="color:#f87171">This will cancel SL/TP orders and close position on Delta Exchange.</b><br><br>Continue?'
+      : 'Close current open trade at live mark price?';
+    _showModal(title, msg, '✓ Yes, Close', '#7f1d1d', async (ok) => {{
+      if (!ok) return;
+      const url = IS_LIVE ? '/test/close?confirm=yes' : '/test/close';
+      const r = await fetch(url);
+      const j = await r.json();
+      if (j.error) {{ _showModal('❌ Error', j.error, 'OK', '#374151', ()=>{{}}); return; }}
+      const px = Number(j.exit_price).toLocaleString();
+      _showModal('✅ Trade Closed',
+        'Closed @ <b>' + px + '</b>' + (IS_LIVE ? '<br>SL/TP cancelled on Delta.' : ''),
+        'OK', '#1d4ed8', () => location.reload());
+    }});
   }}
   async function testTelegram() {{
     const r = await fetch('/test/telegram');
@@ -2881,7 +2913,19 @@ async def dashboard():
 </div>
 
 <div class="footer">
-  Vol Surge v5 · WebSocket-native · HA candles (78% WR) · TP=1.4R · SL=1.8×ATR · LOT={LOT_SIZE} BTC · {'LIVE' if not PAPER_MODE else 'PAPER'}
+  Vol Surge v5 5m · WebSocket-native · TP=1.3R · LOT={LOT_SIZE} BTC · {'LIVE' if not PAPER_MODE else 'PAPER'}
+</div>
+
+<!-- CUSTOM MODAL -->
+<div id="modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:9999;align-items:center;justify-content:center;">
+  <div style="background:#0d1117;border:1px solid #334155;border-radius:12px;padding:28px 32px;min-width:340px;max-width:480px;box-shadow:0 20px 60px rgba(0,0,0,0.8);">
+    <div id="modal-title" style="font-size:15px;font-weight:700;color:#f9fafb;margin-bottom:14px;"></div>
+    <div id="modal-body"  style="font-size:13px;color:#9ca3af;line-height:1.7;margin-bottom:22px;"></div>
+    <div style="display:flex;gap:10px;justify-content:flex-end;">
+      <button onclick="_modalCancel()" style="background:#1e293b;color:#9ca3af;border:1px solid #334155;border-radius:6px;padding:8px 20px;font-size:13px;cursor:pointer;font-family:inherit;">✕ Cancel</button>
+      <button id="modal-yes" onclick="_modalYes()" style="color:#fff;border:none;border-radius:6px;padding:8px 20px;font-size:13px;cursor:pointer;font-family:inherit;font-weight:600;"></button>
+    </div>
+  </div>
 </div>
 </body>
 </html>"""
