@@ -47,7 +47,7 @@ from typing import Optional
 
 import requests
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse
 
 from candle_feed import CandleFeed, Candle
 from signal_engine import SignalEngine, SignalConfig, SignalResult
@@ -2023,6 +2023,44 @@ async def api_live():
     })
 
 
+# ── /api/stream — SSE endpoint, pushes at WS tick speed (~200ms) ─────────────
+@app.get("/api/stream")
+async def api_stream():
+    async def event_gen():
+        import json as _json
+        last_px = None
+        while True:
+            try:
+                await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: feed.mark_price_event.wait(timeout=1.0)
+                )
+                feed.mark_price_event.clear()
+                px = feed.mark_price
+                if not px or px == last_px:
+                    await asyncio.sleep(0.05)
+                    continue
+                last_px = px
+                with _state_lock:
+                    trade_snap = dict(open_trade) if open_trade else None
+                unr = None
+                if trade_snap and px:
+                    d = trade_snap["direction"]
+                    unr = round((px - trade_snap["fill_price"]) if d == "BUY"
+                                else (trade_snap["fill_price"] - px), 2)
+                data = _json.dumps({
+                    "price": round(px, 1),
+                    "unreal": unr,
+                    "sl": trade_snap.get("sl_price") if trade_snap else None,
+                    "tp": trade_snap.get("tp_price") if trade_snap else None,
+                    "has_trade": bool(trade_snap),
+                })
+                yield f"data: {data}\n\n"
+            except Exception:
+                await asyncio.sleep(0.5)
+    return StreamingResponse(event_gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
 # ── /admin/purge-test-trades ──────────────────────────────────────────────────
 @app.get("/admin/purge-test-trades")
 async def purge_test_trades():
@@ -2468,7 +2506,7 @@ async def dashboard():
   .hidden{{display:none}}
 </style>
 <script>
-  setTimeout(()=>location.reload(),3000);
+  setTimeout(()=>location.reload(),30000);
   setInterval(()=>{{document.getElementById('clk').textContent=new Date().toLocaleTimeString('en-IN',{{timeZone:'Asia/Kolkata'}})}},1000);
   window.onload=()=>document.getElementById('clk').textContent=new Date().toLocaleTimeString('en-IN',{{timeZone:'Asia/Kolkata'}});
 
@@ -2643,29 +2681,28 @@ async def dashboard():
 
   window.addEventListener('DOMContentLoaded', () => _applyPage());
 
-  // ── Live price polling (1s via /api/live — memory only, <1ms) ───────────────
-  (function livePrice() {{
-    const elPx    = document.getElementById('ot-live-px');
-    const elUnr   = document.getElementById('ot-unreal');
-    const elDistSL= document.getElementById('ot-dist-sl');
-    const elDistTP= document.getElementById('ot-dist-tp');
-    if (!elPx) return;
-    async function poll() {{
+  // ── Live price SSE (~200ms via /api/stream — WS tick speed) ─────────────────
+  (function liveSSE() {{
+    const elPx     = document.getElementById('ot-live-px');
+    const elUnr    = document.getElementById('ot-unreal');
+    const elDistSL = document.getElementById('ot-dist-sl');
+    const elDistTP = document.getElementById('ot-dist-tp');
+    const src = new EventSource('/api/stream');
+    src.onmessage = function(e) {{
       try {{
-        const j = await fetch('/api/live').then(r => r.json());
-        const px = j.price, unr = j.unreal, sl = j.sl, tp = j.tp;
+        const d = JSON.parse(e.data);
+        const px = d.price, unr = d.unreal, sl = d.sl, tp = d.tp;
         if (!px) return;
-        elPx.textContent = px.toLocaleString('en-US', {{minimumFractionDigits:1,maximumFractionDigits:1}});
-        if (unr !== null && unr !== undefined) {{
+        if (elPx) elPx.textContent = px.toLocaleString('en-US', {{minimumFractionDigits:1,maximumFractionDigits:1}});
+        if (elUnr && unr !== null && unr !== undefined) {{
           elUnr.textContent = (unr >= 0 ? '+' : '') + unr.toFixed(1) + ' pts';
           elUnr.style.color = unr >= 0 ? '#4ade80' : '#f87171';
         }}
-        if (sl) elDistSL.textContent = Math.abs(px - sl).toFixed(1) + ' pts';
-        if (tp) elDistTP.textContent = Math.abs(tp - px).toFixed(1) + ' pts';
-      }} catch(e) {{}}
-    }}
-    poll();
-    setInterval(poll, 1000);
+        if (elDistSL && sl) elDistSL.textContent = Math.abs(px - sl).toFixed(1) + ' pts';
+        if (elDistTP && tp) elDistTP.textContent = Math.abs(tp - px).toFixed(1) + ' pts';
+      }} catch(err) {{}}
+    }};
+    src.onerror = function() {{ src.close(); }};
   }})();
 </script>
 </head>
@@ -2675,7 +2712,7 @@ async def dashboard():
 <div class="hdr">
   <div>
     <h1>⚡ Vol Surge v5 — Live Dashboard</h1>
-    <div style="color:#6b7280;font-size:11px;margin-top:3px;">BTCUSD · Delta Exchange India · <span style="color:#4ade80;font-weight:600;">5m candles</span> · WebSocket-native · <span style="color:#4ade80;">live price 1s</span> · page reload 3s · {now_ist}</div>
+    <div style="color:#6b7280;font-size:11px;margin-top:3px;">BTCUSD · Delta Exchange India · <span style="color:#4ade80;font-weight:600;">5m candles</span> · WebSocket-native · <span style="color:#4ade80;">live price SSE ~200ms</span> · page reload 30s · {now_ist}</div>
   </div>
   <div style="text-align:right;display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
     <span style="background:{mode_bg};color:{mode_col};padding:4px 14px;border-radius:20px;font-size:12px;font-weight:700;">{mode_label}</span>
