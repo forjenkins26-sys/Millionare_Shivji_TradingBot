@@ -123,8 +123,10 @@ STATE_CLOSED  = "CLOSED"
 DATA_DIR   = Path(os.getenv("DATA_DIR", "data")); DATA_DIR.mkdir(exist_ok=True)
 LOG_DIR    = Path(os.getenv("LOG_DIR",  "logs")); LOG_DIR.mkdir(exist_ok=True)
 
-# True when DATA_DIR is a persistent Railway volume (mounted at /app/data)
-_DATA_PERSISTENT = DATA_DIR.is_absolute() and str(DATA_DIR).startswith("/app")
+# True when DATA_DIR is a persistent volume (Railway: /app/data, Fly.io: /data)
+_DATA_PERSISTENT = DATA_DIR.is_absolute() and (
+    str(DATA_DIR).startswith("/app") or str(DATA_DIR).startswith("/data")
+)
 STATE_FILE     = DATA_DIR / "state_v5.json"
 CSV_FILE       = DATA_DIR / "trades_v5.csv"
 RECON_FILE     = DATA_DIR / "reconciliation_v5.csv"
