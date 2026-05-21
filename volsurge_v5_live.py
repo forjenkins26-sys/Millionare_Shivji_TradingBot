@@ -2302,12 +2302,13 @@ async def dashboard():
     # ── Journal rows — DETAILED view (current dashboard style) ───────────────
     journal_rows = ""
     for i, t in enumerate(reversed(trades), 1):
-        outcome = t.get("python_actual_outcome","")
+        outcome   = t.get("python_actual_outcome","")
+        is_test_t = str(t.get("trade_id","")).startswith("TEST_")
         rbg = "#0a1a0a" if outcome=="TP" else "#1a0a0a" if outcome=="SL" else "#0d1117"
         rec = "♻️" if str(t.get("recovery_event","")).lower()=="true" else ""
         slip_pct = t.get("entry_slippage_pct","")
         journal_rows += f"""
-        <tr style="background:{rbg};border-bottom:1px solid #1f2937;">
+        <tr class="trade-row" data-tradetype="{'test' if is_test_t else 'live'}" style="background:{rbg};border-bottom:1px solid #1f2937;">
           <td style="color:#6b7280;text-align:center;">{len(trades)-i+1}</td>
           <td>{_dir(t.get('direction',''))}</td>
           <td style="color:#d1d5db;font-size:11px;">{_dt(t.get('entry_fill_time',''))}</td>
@@ -2341,7 +2342,8 @@ async def dashboard():
         except: pass
     cumulative_pts = 0.0
     for i, t in enumerate(reversed(trades), 1):
-        outcome  = t.get("python_actual_outcome","")
+        outcome    = t.get("python_actual_outcome","")
+        is_test_tv = str(t.get("trade_id","")).startswith("TEST_")
         rbg      = "#0a1a0a" if outcome=="TP" else "#1a0a0a" if outcome=="SL" else "#0d1117"
         pts_val  = 0.0
         try: pts_val = float(t.get("pts", 0) or 0)
@@ -2355,7 +2357,7 @@ async def dashboard():
         pts_col  = "#4ade80" if pts_val >= 0 else "#f87171"
         pnl_col  = "#4ade80" if pnl_val >= 0 else "#f87171"
         tv_rows += f"""
-        <tr style="background:{rbg};border-bottom:1px solid #1f2937;">
+        <tr class="trade-row" data-tradetype="{'test' if is_test_tv else 'live'}" style="background:{rbg};border-bottom:1px solid #1f2937;">
           <td>{_dir_arrow(t.get('direction',''))}</td>
           <td style="color:#9ca3af;font-size:11px;">{_date(t.get('entry_fill_time',''))}</td>
           <td style="color:#d1d5db;font-size:11px;">{_time_only(t.get('entry_fill_time',''))}</td>
@@ -2395,31 +2397,59 @@ async def dashboard():
 <style>
   *{{margin:0;padding:0;box-sizing:border-box}}
   body{{background:#080c10;color:#e2e8f0;font-family:'Segoe UI',system-ui,monospace;font-size:13px}}
-  .hdr{{background:#0d1117;border-bottom:2px solid #1f2937;padding:14px 24px;display:flex;align-items:center;justify-content:space-between}}
-  .hdr h1{{font-size:17px;font-weight:700;color:#f9fafb}}
-  .sec{{font-size:11px;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:1px;padding:16px 24px 8px;display:flex;align-items:center;justify-content:space-between}}
-  .stats{{display:flex;gap:10px;padding:0 24px 16px;flex-wrap:wrap}}
-  .stat{{background:#0d1117;border:1px solid #1e293b;border-radius:8px;padding:12px 16px;min-width:120px}}
-  .sv{{font-size:20px;font-weight:700}}
-  .sl{{font-size:10px;color:#6b7280;margin-top:3px;text-transform:uppercase}}
-  .panel{{background:#0d1117;border:1px solid #1e293b;border-radius:8px;margin:0 24px 16px;padding:16px}}
-  .panel h3{{font-size:12px;color:#9ca3af;font-weight:600;margin-bottom:12px;text-transform:uppercase;letter-spacing:0.5px}}
-  .grid2{{display:grid;grid-template-columns:1fr 1fr;gap:16px}}
-  .grid3{{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px}}
+
+  /* ── Header ── */
+  .hdr{{background:#0d1117;border-bottom:2px solid #166534;padding:16px 28px;display:flex;align-items:center;justify-content:space-between}}
+  .hdr h1{{font-size:18px;font-weight:700;color:#f9fafb}}
+
+  /* ── Toolbar ── */
+  .toolbar{{padding:10px 28px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;border-bottom:1px solid #1f2937}}
+
+  /* ── Section label ── */
+  .sec{{font-size:10px;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:1.2px;
+        padding:20px 28px 10px;display:flex;align-items:center;justify-content:space-between}}
+
+  /* ── Stats grid — fixed equal cards ── */
+  .stats{{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:10px;padding:0 28px 20px}}
+  .stat{{background:#0d1117;border:1px solid #1e293b;border-radius:8px;padding:14px 16px}}
+  .sv{{font-size:20px;font-weight:700;line-height:1.2}}
+  .sl{{font-size:10px;color:#6b7280;margin-top:4px;text-transform:uppercase;letter-spacing:0.6px}}
+
+  /* ── Content panels ── */
+  .panel{{background:#0d1117;border:1px solid #1e293b;border-radius:10px;margin:0 28px 16px;padding:20px 24px}}
+  .panel h3{{font-size:11px;color:#9ca3af;font-weight:700;margin-bottom:14px;text-transform:uppercase;letter-spacing:0.8px;border-bottom:1px solid #1f2937;padding-bottom:8px}}
+
+  /* ── Grids ── */
+  .grid2{{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:0 28px 16px}}
+  .grid3{{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin:0 28px 16px}}
+  .grid2 .panel, .grid3 .panel{{margin:0}}
+
+  /* ── Table wrapper ── */
+  .tw{{padding:0 28px 24px;overflow-x:auto}}
   table{{width:100%;border-collapse:collapse;font-size:11px}}
-  th{{background:#0d1117;color:#6b7280;font-weight:600;text-transform:uppercase;font-size:10px;padding:8px 10px;border-bottom:2px solid #1f2937;white-space:nowrap;position:sticky;top:0}}
-  td{{padding:7px 10px;white-space:nowrap;vertical-align:middle}}
-  tr:hover td{{background:#1e293b!important}}
-  .tw{{padding:0 24px 24px;overflow-x:auto}}
-  .kv{{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #1e293b;font-size:12px}}
+  th{{background:#0d1117;color:#6b7280;font-weight:600;text-transform:uppercase;font-size:10px;
+      padding:9px 12px;border-bottom:2px solid #1f2937;white-space:nowrap}}
+  td{{padding:8px 12px;white-space:nowrap;vertical-align:middle}}
+  tr:hover td{{background:#161f2e!important}}
+
+  /* ── Key-value rows ── */
+  .kv{{display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid #1a2030;font-size:12px}}
   .kv:last-child{{border-bottom:none}}
   .kl{{color:#6b7280}}
   .kv2{{color:#e2e8f0;font-weight:600}}
-  .insight{{background:#0f1f0f;border-left:3px solid #4ade80;padding:8px 12px;border-radius:4px;font-size:12px;color:#86efac;margin:4px 0}}
+
+  /* ── Insight cards ── */
+  .insight{{background:#0f1f0f;border-left:3px solid #4ade80;padding:9px 14px;border-radius:4px;font-size:12px;color:#86efac;margin:5px 0;line-height:1.5}}
   .insight.warn{{background:#1f0f0f;border-color:#f87171;color:#fca5a5}}
   .insight.info{{background:#0f1525;border-color:#60a5fa;color:#93c5fd}}
-  .footer{{text-align:center;padding:16px;color:#374151;font-size:10px;border-top:1px solid #1f2937;margin-top:8px}}
-  .toggle-btn{{background:#1e293b;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:5px 14px;font-size:11px;cursor:pointer;font-family:inherit;transition:all 0.2s}}
+
+  /* ── Footer ── */
+  .footer{{text-align:center;padding:18px;color:#374151;font-size:10px;border-top:1px solid #1f2937;margin-top:4px}}
+
+  /* ── Toggle buttons ── */
+  .toggle-btn{{background:#1e293b;color:#e2e8f0;border:1px solid #334155;border-radius:6px;
+               padding:5px 14px;font-size:11px;cursor:pointer;font-family:inherit;transition:background 0.15s,color 0.15s}}
+  .toggle-btn:disabled{{opacity:0.4;cursor:default}}
   .toggle-btn.active{{background:#1d4ed8;color:#fff;border-color:#2563eb}}
   .toggle-group{{display:flex;gap:6px}}
   .hidden{{display:none}}
@@ -2531,6 +2561,48 @@ async def dashboard():
     localStorage.setItem('vs_trade_dir', CURRENT_DIRECTION);
   }});
 
+  let _page = 1;
+  const _PER_PAGE = 10;
+  let _filter = 'all';
+
+  function _visibleRows() {{
+    return Array.from(document.querySelectorAll('.trade-row')).filter(r => {{
+      if (_filter === 'live') return r.dataset.tradetype !== 'test';
+      if (_filter === 'test') return r.dataset.tradetype === 'test';
+      return true;
+    }});
+  }}
+
+  function _applyPage() {{
+    const rows = _visibleRows();
+    const total = rows.length;
+    const pages = Math.max(1, Math.ceil(total / _PER_PAGE));
+    if (_page > pages) _page = pages;
+    document.querySelectorAll('.trade-row').forEach(r => r.style.display = 'none');
+    rows.slice((_page-1)*_PER_PAGE, _page*_PER_PAGE).forEach(r => r.style.display = '');
+    const info = document.getElementById('page-info');
+    const btnP = document.getElementById('btn-prev-page');
+    const btnN = document.getElementById('btn-next-page');
+    if (info) info.textContent = total === 0 ? 'No trades' : 'Page ' + _page + ' / ' + pages + ' · ' + total + ' trades';
+    if (btnP) btnP.disabled = _page <= 1;
+    if (btnN) btnN.disabled = _page >= pages;
+  }}
+
+  function filterTrades(mode) {{
+    _filter = mode; _page = 1;
+    ['btn-filter-all','btn-filter-live','btn-filter-test'].forEach(id => {{
+      document.getElementById(id).classList.remove('active');
+    }});
+    document.getElementById('btn-filter-' + mode).classList.add('active');
+    _applyPage();
+  }}
+
+  function prevPage() {{ if (_page > 1) {{ _page--; _applyPage(); }} }}
+  function nextPage() {{
+    const pages = Math.ceil(_visibleRows().length / _PER_PAGE);
+    if (_page < pages) {{ _page++; _applyPage(); }}
+  }}
+
   function switchView(mode) {{
     const det = document.getElementById('view-detailed');
     const tv  = document.getElementById('view-tv');
@@ -2548,6 +2620,8 @@ async def dashboard():
       btnTv.classList.add('active'); btnDet.classList.remove('active');
     }}
   }}
+
+  window.addEventListener('DOMContentLoaded', () => _applyPage());
 </script>
 </head>
 <body>
@@ -2569,7 +2643,7 @@ async def dashboard():
 
 {_persist_warn}
 
-<div style="padding:8px 24px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+<div class="toolbar">
   <div style="font-size:11px;color:#6b7280;">
     📊 Closed trades: <b style="color:#e2e8f0">{len(trades)}</b>
     &nbsp;|&nbsp; Data: <code style="color:#60a5fa">{DATA_DIR}</code>
@@ -2623,6 +2697,77 @@ async def dashboard():
 
 <!-- OPEN TRADE PANEL -->
 {open_panel}
+
+<!-- TRADE JOURNAL with toggle -->
+<div class="sec">
+  <span>Trade Journal — All Trades (newest first)</span>
+  <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+    <div class="toggle-group" style="border-right:1px solid #1f2937;padding-right:10px;margin-right:2px;">
+      <button class="toggle-btn active" id="btn-filter-all"  onclick="filterTrades('all')">All</button>
+      <button class="toggle-btn"        id="btn-filter-live" onclick="filterTrades('live')" style="color:#4ade80;">🟢 Live</button>
+      <button class="toggle-btn"        id="btn-filter-test" onclick="filterTrades('test')" style="color:#60a5fa;">🧪 Test</button>
+    </div>
+    <div class="toggle-group" style="border-right:1px solid #1f2937;padding-right:10px;margin-right:2px;">
+      <button class="toggle-btn active" id="btn-detailed" onclick="switchView('detailed')">📋 Detailed</button>
+      <button class="toggle-btn" id="btn-tv" onclick="switchView('tv')">📊 TV Style</button>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <button class="toggle-btn" id="btn-prev-page" onclick="prevPage()" style="padding:3px 10px;">‹</button>
+      <span id="page-info" style="color:#9ca3af;font-size:11px;min-width:140px;text-align:center;">Page 1 / 1</span>
+      <button class="toggle-btn" id="btn-next-page" onclick="nextPage()" style="padding:3px 10px;">›</button>
+    </div>
+  </div>
+</div>
+
+<div class="tw" style="height:420px;overflow-y:auto;overflow-x:auto;margin-bottom:20px;padding:0 28px 0;">
+<table style="min-width:900px;">
+  <!-- DETAILED headers -->
+  <thead id="th-detailed" style="position:sticky;top:0;z-index:2;background:#0d1117;">
+    <tr>
+      <th>#</th><th>Dir</th><th>Time (IST)</th><th>TF</th>
+      <th style="text-align:right">Fill $</th>
+      <th style="text-align:right">TP $</th>
+      <th style="text-align:right">SL $</th>
+      <th style="text-align:right">Exit $</th>
+      <th style="text-align:right">Pts</th>
+      <th style="text-align:right">P&L</th>
+      <th>Result</th>
+      <th>Exit Type</th>
+      <th style="text-align:right">Slip pts</th>
+      <th style="text-align:right">Slip %</th>
+      <th style="text-align:right">Sig lat</th>
+      <th style="text-align:right">En lat</th>
+      <th style="text-align:right">Duration</th>
+      <th>Grade</th>
+      <th>Entry OID</th>
+      <th>Exit OID</th>
+      <th>Rec</th>
+    </tr>
+  </thead>
+  <!-- TV-STYLE headers -->
+  <thead id="th-tv" class="hidden" style="position:sticky;top:0;z-index:2;background:#0d1117;">
+    <tr>
+      <th>Dir</th><th>Date</th><th>In</th><th>Out</th>
+      <th style="text-align:right">Entry $</th>
+      <th style="text-align:right">Exit $</th>
+      <th style="text-align:right">SL $</th>
+      <th style="text-align:right">Pts</th>
+      <th style="text-align:right">Lots</th>
+      <th style="text-align:right">P&L $</th>
+      <th style="text-align:right">Fix P&L</th>
+      <th style="text-align:center">Status</th>
+    </tr>
+  </thead>
+  <tbody id="view-detailed">
+    {journal_rows}
+    {journal_empty}
+  </tbody>
+  <tbody id="view-tv" class="hidden">
+    {tv_rows}
+    {tv_empty}
+  </tbody>
+</table>
+</div>
 
 <!-- PERFORMANCE STATS -->
 <div class="sec">Performance Summary</div>
@@ -2704,65 +2849,6 @@ async def dashboard():
     <th style="text-align:right">+ms</th><th>Order ID</th><th>Notes</th>
   </tr></thead>
   <tbody>{lc_rows or lc_empty}</tbody>
-</table>
-</div>
-
-<!-- TRADE JOURNAL with toggle -->
-<div class="sec">
-  <span>Trade Journal — All Trades (newest first)</span>
-  <div class="toggle-group">
-    <button class="toggle-btn active" id="btn-detailed" onclick="switchView('detailed')">📋 Detailed</button>
-    <button class="toggle-btn" id="btn-tv" onclick="switchView('tv')">📊 TradingView Style</button>
-  </div>
-</div>
-
-<div class="tw">
-<table>
-  <!-- DETAILED headers -->
-  <thead id="th-detailed">
-    <tr>
-      <th>#</th><th>Dir</th><th>Time (IST)</th><th>TF</th>
-      <th style="text-align:right">Fill $</th>
-      <th style="text-align:right">TP $</th>
-      <th style="text-align:right">SL $</th>
-      <th style="text-align:right">Exit $</th>
-      <th style="text-align:right">Pts</th>
-      <th style="text-align:right">P&L</th>
-      <th>Result</th>
-      <th>Exit Type</th>
-      <th style="text-align:right">Slip pts</th>
-      <th style="text-align:right">Slip %</th>
-      <th style="text-align:right">Sig lat</th>
-      <th style="text-align:right">En lat</th>
-      <th style="text-align:right">Duration</th>
-      <th>Grade</th>
-      <th>Entry OID</th>
-      <th>Exit OID</th>
-      <th>Rec</th>
-    </tr>
-  </thead>
-  <!-- TV-STYLE headers -->
-  <thead id="th-tv" class="hidden">
-    <tr>
-      <th>Dir</th><th>Date</th><th>In</th><th>Out</th>
-      <th style="text-align:right">Entry $</th>
-      <th style="text-align:right">Exit $</th>
-      <th style="text-align:right">SL $</th>
-      <th style="text-align:right">Pts</th>
-      <th style="text-align:right">Lots</th>
-      <th style="text-align:right">P&L $</th>
-      <th style="text-align:right">Fix P&L</th>
-      <th style="text-align:center">Status</th>
-    </tr>
-  </thead>
-  <tbody id="view-detailed">
-    {journal_rows}
-    {journal_empty}
-  </tbody>
-  <tbody id="view-tv" class="hidden">
-    {tv_rows}
-    {tv_empty}
-  </tbody>
 </table>
 </div>
 
