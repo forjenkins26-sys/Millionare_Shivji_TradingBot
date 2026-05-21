@@ -1974,6 +1974,27 @@ async def test_telegram():
     return JSONResponse({"status": "sent"})
 
 
+# ── /admin/purge-test-trades ──────────────────────────────────────────────────
+@app.get("/admin/purge-test-trades")
+async def purge_test_trades():
+    """Permanently remove TEST_CLOSE and AUTO_EXIT rows from trades_v5.csv.
+    Call once to clean up Railway volume. Returns purged/remaining counts."""
+    _TEST_EXIT_TYPES = {"TEST_CLOSE", "AUTO_EXIT"}
+    try:
+        with open(CSV_FILE, "r", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        genuine = [r for r in rows if r.get("exit_type", "") not in _TEST_EXIT_TYPES]
+        removed = len(rows) - len(genuine)
+        if removed > 0:
+            with open(CSV_FILE, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=CSV_HEADERS, extrasaction="ignore")
+                writer.writeheader()
+                writer.writerows(genuine)
+        return JSONResponse({"status": "ok", "purged": removed, "remaining": len(genuine)})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 # ── /dashboard ────────────────────────────────────────────────────────────────
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard():
@@ -1986,6 +2007,12 @@ async def dashboard():
             trades = list(csv.DictReader(f))
     except Exception:
         pass
+
+    # ── Filter: hide test entries from all stats and journal ─────────────────
+    # TEST_CLOSE = manual /test/close button; AUTO_EXIT = test fallback close.
+    # Keeps only genuine live exits: TP_LIVE, SL_LIVE, SL_SOFTWARE.
+    _TEST_EXIT_TYPES = {"TEST_CLOSE", "AUTO_EXIT"}
+    trades = [t for t in trades if t.get("exit_type", "") not in _TEST_EXIT_TYPES]
 
     # ── Load lifecycle events (last 50) ───────────────────────────────────────
     lifecycle_rows = []
