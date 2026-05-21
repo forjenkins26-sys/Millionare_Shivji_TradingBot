@@ -574,7 +574,6 @@ def place_limit_entry_order(
         # Drift check — cancel if price runs too far without filling
         cur_price = fetch_price()
         if cur_price:
-<<<<<<< Updated upstream
             # BUY limit: drift = price running UP above limit (good direction but no pullback)
             # SELL limit: drift = price running DOWN below limit (good direction but no pullback)
             drift     = (cur_price - limit_price) if side.lower() == "buy" else (limit_price - cur_price)
