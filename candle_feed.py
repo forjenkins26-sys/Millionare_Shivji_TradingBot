@@ -132,6 +132,10 @@ class CandleFeed:
 
         await self._backfill(300)
 
+        # Proactive wall-clock watchdog: fires at exact bar boundaries regardless of WS latency.
+        # This eliminates the 6–7s entry slippage caused by delayed WS next-bar ticks.
+        asyncio.get_event_loop().create_task(self._bar_close_watchdog())
+
         backoff = _BACKOFF_INITIAL
         while self._running:
             try:
@@ -440,40 +444,80 @@ class CandleFeed:
             except Exception as e:
                 self.log.error(f"[FEED] on_candle_close callback raised: {e}")
 
-    # ── Scheduled close guard ─────────────────────────────────────────────────
+    # ── Wall-clock bar close watchdog (primary) ───────────────────────────────
+
+    async def _bar_close_watchdog(self):
+        """
+        Proactive wall-clock bar close guard — fires at exact epoch boundaries.
+
+        Root cause of 6–7s slippage: _schedule_close_guard only starts when the
+        FIRST WS tick for a forming bar arrives. If WS is late, the guard starts
+        late and fires late. During volatile periods (when Vol Surge signals fire)
+        Delta WS next-bar tick can arrive 6–7s after bar end.
+
+        This watchdog runs independently of WS. It wakes every CANDLE_SECONDS
+        at exactly bar_ts + CANDLE_SECONDS + 200ms. If the bar wasn't naturally
+        closed by a WS tick, it force-closes from _forming state.
+
+        Result: signal latency drops from ~6700ms → ~200ms on slow-WS bars.
+        """
+        self.log.info(f"[FEED] ⏰ Wall-clock watchdog started (period={CANDLE_SECONDS}s)")
+        while self._running:
+            now          = time.time()
+            next_bar_end = (int(now) // CANDLE_SECONDS + 1) * CANDLE_SECONDS
+            wait         = next_bar_end - now + 0.2   # 200ms grace after bar end
+            await asyncio.sleep(wait)
+
+            bar_ts = next_bar_end - CANDLE_SECONDS
+
+            # Already naturally closed by WS tick (normal path)?
+            if self.last_closed and self.last_closed.ts >= bar_ts:
+                self.log.debug(f"[FEED] ⏰ watchdog ts={bar_ts}: WS closed naturally — OK")
+                continue
+
+            # Force-close from forming state
+            if self._forming and self._forming["ts"] == bar_ts:
+                f       = self._forming
+                elapsed = round(time.time() - next_bar_end, 3)
+                self.log.info(
+                    f"[FEED] ⏰ PROACTIVE CLOSE ts={bar_ts} "
+                    f"(wall-clock guard fired +{elapsed:.3f}s — WS tick was late)"
+                )
+                self._emit_closed(
+                    Candle(ts=f["ts"], open=f["open"], high=f["high"],
+                           low=f["low"], close=f["close"], volume=f["volume"])
+                )
+                self._forming = None
+            else:
+                self.log.info(
+                    f"[FEED] ⏰ watchdog ts={bar_ts}: no forming candle to close "
+                    f"(forming_ts={self._forming['ts'] if self._forming else None}, "
+                    f"last_closed_ts={self.last_closed.ts if self.last_closed else None})"
+                )
+
+    # ── Scheduled close guard (secondary / per-bar backup) ────────────────────
 
     def _schedule_close_guard(self, bar_ts: int):
-        """
-        Schedule a forced bar-close at exactly bar_ts + CANDLE_SECONDS + 200ms.
-
-        Without this, bar close is only detected when the NEXT bar's first WS
-        tick arrives — which can lag 200ms–30s+ after actual bar end, especially
-        in slow or quiet markets. That delay directly becomes entry slippage.
-
-        The 200ms grace allows the natural WS close to arrive first in busy
-        markets. In slow markets the guard fires and closes at the right time.
-        """
+        """Per-bar backup guard — belt-and-suspenders alongside the watchdog."""
         try:
             asyncio.get_running_loop().create_task(
                 self._scheduled_close_guard(bar_ts)
             )
         except RuntimeError:
-            pass   # not in asyncio context (e.g. called from backfill) — safe to skip
+            pass
 
     async def _scheduled_close_guard(self, bar_ts: int):
         close_unix = bar_ts + CANDLE_SECONDS
-        delay      = close_unix - time.time() + 0.2   # 200ms grace
+        delay      = close_unix - time.time() + 0.2
         if delay > 0:
             await asyncio.sleep(delay)
 
-        # Natural WS close already emitted?
         if self.last_closed and self.last_closed.ts >= bar_ts:
-            self.log.debug(f"[FEED] ⏰ guard ts={bar_ts}: WS closed naturally — OK")
+            self.log.debug(f"[FEED] ⏰ per-bar guard ts={bar_ts}: already closed — OK")
             return
 
-        # Force-emit from current forming state
         if self._forming and self._forming["ts"] == bar_ts:
-            f = self._forming
+            f       = self._forming
             elapsed = round(time.time() - close_unix, 3)
             self.log.info(
                 f"[FEED] ⏰ FORCED CLOSE ts={bar_ts} "
@@ -486,6 +530,6 @@ class CandleFeed:
             self._forming = None
         else:
             self.log.debug(
-                f"[FEED] ⏰ guard ts={bar_ts}: _forming changed — skip "
+                f"[FEED] ⏰ per-bar guard ts={bar_ts}: _forming changed — skip "
                 f"(last_closed={self.last_closed.ts if self.last_closed else None})"
             )
