@@ -4,13 +4,15 @@
 #
 
 app = 'millionare-shivji-tradingbot'
-primary_region = 'bom'
+primary_region = 'nrt'
 
 [build]
   dockerfile = 'Dockerfile'
 
 [env]
   PORT = '8080'
+  DATA_DIR = '/data'
+  LOG_DIR = '/data/logs'
 
 [[mounts]]
   source = 'volsurge_15m_data'

@@ -40,6 +40,7 @@ import os
 import sys
 import threading
 import time
+import uuid
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -90,10 +91,19 @@ USE_EMA_FILT  = os.getenv("USE_EMA_FILTER",     "false").lower() == "true"
 USE_SESSION   = os.getenv("USE_SESSION",        "false").lower() == "true"
 # Safety factor: 1.0 = exact Pine match (no extra buffer). Increase to reduce false signals.
 SAFETY_FACTOR = float(os.getenv("SIGNAL_SAFETY_FACTOR", "1.0"))
+# Momentum Quality Filter A: Min Absolute Body
+# Blocks signal when candle body < MIN_BODY_PTS (same as Pine useMinBody/minBodyPts).
+# 250 pts confirmed better WR on BTC 5m historical — matches Pine setting.
+USE_MIN_BODY  = True    # Filter ON — block signals with body < 250 pts
+MIN_BODY_PTS  = 250.0   # Min body pts — matches Pine minBodyPts setting
 # Heikin-Ashi mode: MUST match TradingView chart type.
 # True  → 78% WR, 46 trades (HA chart in TradingView) ← confirmed better
 # False → 49% WR, 173 trades (regular candle chart)
 USE_HA        = os.getenv("USE_HA_CANDLES", "true").lower() == "true"
+# Stale-signal guard: skip entry if bar closed more than this many seconds ago.
+# Prevents entering on signals produced by forced-close after WS feed death.
+# 5m bar = 300s. Default 60s allows normal processing latency; anything beyond = stale.
+MAX_SIGNAL_AGE_S = int(os.getenv("MAX_SIGNAL_AGE_S", "60"))
 
 # ── Trade parameters ──────────────────────────────────────────────────
 # TP_R: must match Pine's vsTP2R (1.3R — signal-anchored TP)
@@ -460,6 +470,7 @@ def place_market_order(side: str, size: float, reduce_only: bool = False,
         "product_id": PRODUCT_ID, "size": contracts,
         "side": side.lower(), "order_type": "market_order",
         "time_in_force": "ioc", "reduce_only": reduce_only,
+        "client_order_id": uuid.uuid4().hex,
     }
     api_req_t = time.time()
     resp      = _post("/v2/orders", body)
@@ -630,6 +641,7 @@ def place_tp_order(close_side: str, size: float, tp_price: float,
         "side": close_side.lower(), "order_type": "limit_order",
         "limit_price": str(round(tp_price, 1)),
         "reduce_only": True, "time_in_force": "gtc",
+        "client_order_id": uuid.uuid4().hex,
     }
     resp = _post("/v2/orders", body)
     if resp and resp.get("result", {}).get("id"):
@@ -1189,6 +1201,13 @@ def _process_entry(
         d = signal
         _log(f"ENTRY_START | {d} sl_dist={sl_dist:.1f} pine_entry={pine_entry_px:,.1f}")
 
+        # ── Exchange health guard ─────────────────────────────────────────────
+        if feed.exchange_degraded:
+            msg = f"⏭️ ENTRY SKIPPED [{d}] — Delta Exchange degraded/maintenance\nStatus: {feed.exchange_status}"
+            _logw(f"[ENTRY BLOCKED] Exchange status={feed.exchange_status!r} — skipping {d} entry")
+            tg(msg)
+            return
+
         fill_px = None
         sl_oid  = tp_oid = None
         entry_order_id = api_request_time = api_ack_time = None
@@ -1235,9 +1254,38 @@ def _process_entry(
             result = place_market_order(side, LOT_SIZE, ref_price=pine_entry_px)
             if not result:
                 err = getattr(place_market_order, "_last_error", "unknown")
-                _loge(f"Entry market order FAILED — aborting | Delta: {err}")
-                tg(f"❌ ENTRY FAILED [{d}]\nDelta error: <code>{err}</code>")
-                return
+                _loge(f"Entry market order API error — Delta: {err} — checking if position opened anyway")
+                # ── Ghost-entry recovery ─────────────────────────────────
+                # Delta sometimes processes the order but returns an error on the API response
+                # (network timeout, server hiccup). Check position before declaring failure.
+                time.sleep(0.5)   # brief wait for Delta backend to settle
+                _ghost_pos = get_open_position()
+                if _ghost_pos and _ghost_pos is not _POS_API_ERROR:
+                    _ghost_fill  = round(float(_ghost_pos.get("entry_price", pine_entry_px)), 1)
+                    _ghost_size  = float(_ghost_pos.get("size", 0))
+                    _ghost_side  = _ghost_pos.get("side", side)
+                    _loge(
+                        f"[GHOST ENTRY DETECTED] Order went through despite API error!\n"
+                        f"  fill={_ghost_fill}  size={_ghost_size}  side={_ghost_side}"
+                    )
+                    tg(
+                        f"⚠️ <b>GHOST ENTRY RECOVERED [{d}]</b>\n"
+                        f"Delta API errored but order filled @ <b>{_ghost_fill:,.1f}</b>\n"
+                        f"Slippage vs signal: {_ghost_fill - pine_entry_px:+.1f}pts\n"
+                        f"Placing TP/SL now..."
+                    )
+                    # Synthesise result so rest of entry flow runs normally
+                    result = {
+                        "order_id":        "",
+                        "fill_price":      _ghost_fill,
+                        "api_request_time": time.time(),
+                        "api_ack_time":     time.time(),
+                    }
+                    fill_px = _ghost_fill
+                else:
+                    _loge(f"Entry market order CONFIRMED FAILED — no position found | Delta: {err}")
+                    tg(f"❌ ENTRY FAILED [{d}]\nDelta error: <code>{err}</code>")
+                    return
 
             entry_order_id   = str(result.get("order_id", ""))
             api_request_time = result.get("api_request_time")
@@ -1426,6 +1474,8 @@ sig_cfg = SignalConfig(
     use_session    = USE_SESSION,
     safety_factor  = SAFETY_FACTOR,
     use_ha         = USE_HA,     # True = Heikin-Ashi (78% WR), False = regular OHLC (49% WR)
+    use_min_body   = USE_MIN_BODY,   # Filter A: block signals with body < MIN_BODY_PTS
+    min_body_pts   = MIN_BODY_PTS,   # 250.0 pts — matches Pine minBodyPts setting
 )
 
 engine = SignalEngine(config=sig_cfg, logger=logging.getLogger("signal_engine"))
@@ -1455,6 +1505,24 @@ def on_candle_close(candle: Candle, buffer: deque):
     recv_time = time.time()
     sr        = engine.build_signal_result(state)
     if not sr:
+        return
+
+    # ── Stale-signal guard ───────────────────────────────────────────
+    # If the WS feed died and the bar was force-closed late, sr.ts + 300 will
+    # be far in the past. Entering on a 27-min-old signal is wrong — price
+    # already moved, Delta rejects the order, and the trade would be stale.
+    bar_close_epoch = sr.ts + 300          # 5m bar: open_ts + 300s = close_ts
+    signal_age_s    = recv_time - bar_close_epoch
+    if signal_age_s > MAX_SIGNAL_AGE_S:
+        _logw(
+            f"[SIGNAL] {sr.signal} SKIPPED_STALE — bar closed {signal_age_s:.0f}s ago "
+            f"(max {MAX_SIGNAL_AGE_S}s) — feed was dead during signal bar"
+        )
+        tg(
+            f"⏭️ <b>SIGNAL SKIPPED [STALE]</b> [{sr.signal}]\n"
+            f"Bar closed <b>{signal_age_s:.0f}s ago</b> (max {MAX_SIGNAL_AGE_S}s)\n"
+            f"WS feed was dead — entry skipped to avoid stale trade"
+        )
         return
 
     log.info(
@@ -1565,6 +1633,7 @@ async def startup():
     # Start the WebSocket candle feed
     asyncio.create_task(feed.start())
     asyncio.create_task(_feed_watchdog())
+    asyncio.create_task(_preflight_retry_loop())   # auto-unblock entries if preflight failed at startup
     asyncio.create_task(_http_keepwarm())   # keep Delta REST TCP connection warm between trades
 
     # OOM / hard-crash orphan recovery — detects untracked Delta positions
@@ -1751,29 +1820,86 @@ async def _orphan_recovery():
     threading.Thread(target=_position_monitor, daemon=True, name="mon-orphan").start()
 
 
+async def _preflight_retry_loop():
+    """
+    Auto-retry preflight every 60s when it failed at startup.
+    Root cause: Delta outage → startup preflight hits 502 → _preflight_ok=False.
+    Without retry, ALL signals are blocked indefinitely until manual restart.
+    This loop re-checks until preflight passes, then exits.
+    """
+    global _preflight_ok
+    if _preflight_ok or PAPER_MODE:
+        return   # already good — nothing to do
+    log.info("[PREFLIGHT] Auto-retry loop started (retry every 60s until pass)")
+    while not _preflight_ok:
+        await asyncio.sleep(60)
+        if _preflight_ok:   # set externally (e.g. orphan recovery)
+            break
+        try:
+            pf = await asyncio.get_event_loop().run_in_executor(None, run_preflight)
+            if pf.get("all_passed", False):
+                _preflight_ok = True
+                log.info("[PREFLIGHT] Auto-retry PASSED — entries unblocked")
+                tg("✅ Pre-flight auto-retry PASSED — entries now live")
+                break
+            else:
+                failing = [k for k, v in pf.items() if k not in ("all_passed", "mode", "timestamp") and v is False]
+                log.warning(f"[PREFLIGHT] Auto-retry still failing: {failing}")
+        except Exception as e:
+            log.warning(f"[PREFLIGHT] Auto-retry error: {e}")
+
+
 async def _feed_watchdog():
-    """Warn every 5 min if feed is unhealthy."""
+    """
+    Warn when feed is unhealthy.
+    Alert rate-limited: first alert fires immediately, repeat only every 15min.
+    Auto-restart: if stale > 30min → os._exit(1) → Fly auto-restarts container.
+    Reconnect OK: fires once when feed transitions disconnected → connected.
+    """
     await asyncio.sleep(120)
+    _last_stale_alert:  float = 0.0     # time.time() of last stale Telegram alert
+    _last_discon_alert: float = 0.0     # time.time() of last disconnect Telegram alert
+    _was_connected:     bool  = True    # track previous connected state for recovery alert
+    _ALERT_COOLDOWN    = 900.0          # 15min between repeat alerts
+    _AUTO_RESTART_AGE  = 1800.0         # 30min stale → self-restart
     while True:
         if not feed.connected:
+            now = time.time()
             log.warning("[WATCHDOG] Feed disconnected")
-            tg("⚠️ Vol Surge v5: WebSocket feed disconnected — reconnecting...")
-        elif not feed.is_ready:
+            _was_connected = False
+            # Rate-limit disconnect spam (max 1 alert per 15min)
+            if now - _last_discon_alert > _ALERT_COOLDOWN:
+                tg("⚠️ Vol Surge v5: WebSocket feed disconnected — reconnecting...")
+                _last_discon_alert = now
+        else:
+            # Feed is connected — check if we just recovered from a disconnect
+            if not _was_connected:
+                log.info("[WATCHDOG] Feed reconnected ✅")
+                tg("✅ Vol Surge v5: WebSocket feed reconnected — feed healthy")
+                _was_connected = True
+        if feed.connected and not feed.is_ready:
             log.warning("[WATCHDOG] Feed not ready — buffer thin")
         elif feed.last_closed:
             # Measure from bar CLOSE (ts + 300), not bar START (ts)
-            # A 5m bar starts 300s before it closes — using ts directly
-            # makes age=5min immediately after close, causing false alarms.
             age = time.time() - (feed.last_closed.ts + 300)
             if age > 600:   # no bar closed in last 10min (2× 5m bars)
-                # Guard against false alarms at startup:
-                # Delta's REST backfill can lag 10-20min — last_closed may be
-                # old even though the WebSocket is live and receiving frames.
-                # Only alarm if BOTH candle age is stale AND WS frames are silent.
                 _frame_age = (time.time() - feed.last_frame_at) if feed.last_frame_at else 9999
                 if _frame_age > 120:   # WS also silent for 2min → truly stale
                     log.warning(f"[WATCHDOG] No bar in {age/60:.1f}min, last WS frame {_frame_age:.0f}s ago — stale feed")
-                    tg(f"⚠️ Vol Surge v5: No candle received for {age/60:.1f}min — stale feed")
+
+                    # Auto-restart if stuck too long — Fly will bring container back up
+                    if age > _AUTO_RESTART_AGE:
+                        log.error(f"[WATCHDOG] Stale > {_AUTO_RESTART_AGE/60:.0f}min — triggering auto-restart")
+                        tg(f"🔄 Vol Surge v5: Feed stale {age/60:.0f}min — auto-restarting to recover")
+                        import os; os._exit(1)
+
+                    # Rate-limited Telegram alert (max 1 per 15min)
+                    now = time.time()
+                    if now - _last_stale_alert > _ALERT_COOLDOWN:
+                        tg(f"⚠️ Vol Surge v5: No candle received for {age/60:.1f}min — stale feed (Delta outage?)")
+                        _last_stale_alert = now
+                    else:
+                        log.warning(f"[WATCHDOG] Stale alert suppressed (cooldown {_ALERT_COOLDOWN/60:.0f}min)")
                 else:
                     log.debug(f"[WATCHDOG] last_closed age={age/60:.1f}min but WS alive ({_frame_age:.0f}s ago) — mid-bar OK")
         await asyncio.sleep(300)
@@ -2080,6 +2206,26 @@ async def purge_test_trades():
                 writer.writeheader()
                 writer.writerows(genuine)
         return JSONResponse({"status": "ok", "purged": removed, "remaining": len(genuine)})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# ── /admin/clear-all-trades ───────────────────────────────────────────────────
+@app.get("/admin/clear-all-trades")
+async def clear_all_trades():
+    """Wipe ALL rows from trades_v5.csv (keeps CSV header). Irreversible."""
+    try:
+        count = 0
+        try:
+            with open(CSV_FILE, "r", encoding="utf-8") as f:
+                count = max(0, sum(1 for _ in f) - 1)   # rows excluding header
+        except Exception:
+            pass
+        with open(CSV_FILE, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=CSV_HEADERS, extrasaction="ignore")
+            writer.writeheader()
+        _logw(f"[ADMIN] /admin/clear-all-trades — wiped {count} rows from trades_v5.csv")
+        return JSONResponse({"status": "ok", "wiped": count, "message": "All trade rows cleared. CSV header preserved."})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 

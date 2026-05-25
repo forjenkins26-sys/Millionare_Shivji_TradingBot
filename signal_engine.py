@@ -49,7 +49,7 @@ class SignalConfig:
     burst_mult:   float = 2.0    # vsBurstMult
     sl_mult:      float = 1.8    # vsSLMult  — Pine default 1.8
     tp1_r:        float = 1.0    # vsTP1R (kept for completeness)
-    tp2_r:        float = 1.4    # vsTP2R — Pine default 1.4
+    tp2_r:        float = 1.3    # vsTP2R — Pine default 1.3 (matches pine_volsurge_v5.pine vsTP2R)
     cooldown:     int   = 3      # vsCooldown bars after signal
 
     ema_length:   int   = 200    # emaLen
@@ -68,6 +68,13 @@ class SignalConfig:
     #                Produces 78% WR (46 trades) vs 49% WR (173 trades) on regular.
     # use_ha=False → run indicators on raw OHLC (only if TV chart is regular candles).
     use_ha: bool = True
+
+    # ── Momentum Quality Filter A: Min Absolute Body ───────────────────────────
+    # Blocks signal when candle_body < min_body_pts regardless of burst threshold.
+    # Prevents entries when chop is tiny and dynamic threshold drops too low.
+    # Pine equivalent: useMinBody / minBodyPts (default ON, 250 pts for BTC 5m)
+    use_min_body: bool  = True
+    min_body_pts: float = 250.0
 
     # IST = UTC+5:30 session windows
     london_open:  int   = 11
@@ -353,6 +360,10 @@ def compute_indicators(
     is_burst_bull         = candle_body >= effective_burst and curr.close > curr.open
     is_burst_bear         = candle_body >= effective_burst and curr.close < curr.open
 
+    # ── Momentum Quality Filter A: Min Absolute Body ──────────────────────────
+    # Pine: minBodyOK = not useMinBody or candleBody >= minBodyPts
+    min_body_ok = not cfg.use_min_body or candle_body >= cfg.min_body_pts
+
     # ── EMA200 (Pine line 46) ─────────────────────────────────────────────────
     closes      = [c.close for c in candles]
     ema_series  = compute_ema_series(closes, cfg.ema_length)
@@ -377,9 +388,9 @@ def compute_indicators(
     # ── Signal (Pine lines 167-168) ───────────────────────────────────────────
     signal = ""
     if not in_trade and cooldown_ok and session_ok:
-        if is_burst_bull and ema_ok_long and gate_ok_long:
+        if is_burst_bull and ema_ok_long and gate_ok_long and min_body_ok:
             signal = "BUY"
-        elif is_burst_bear and ema_ok_short and gate_ok_short:
+        elif is_burst_bear and ema_ok_short and gate_ok_short and min_body_ok:
             signal = "SELL"
 
     return IndicatorState(

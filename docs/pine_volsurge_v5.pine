@@ -1,5 +1,5 @@
 //@version=5
-indicator("Vol Surge v5 — Delta Algo BOt [Standalone]", overlay=true, max_lines_count=500, max_labels_count=300, max_bars_back=500)
+indicator("Vol Surge v5 BTC 5min Bot — Delta Algo BOt [Standalone]", overlay=true, max_lines_count=500, max_labels_count=300, max_bars_back=500)
 
 
 // ═══════════════════════════════════════════════════════════
@@ -10,7 +10,7 @@ vsLookback  = input.int(5,     "Chop lookback (bars)",               minval=2,  
 vsBurstMult = input.float(2.0, "Burst multiplier (body ÷ chop avg)", minval=1.0,maxval=6.0, step=0.25, group=grpCore)
 vsSLMult    = input.float(1.8,"SL  (× pre-burst ATR5)",             minval=0.3,maxval=2.0, step=0.05, group=grpCore)
 vsTP1R      = input.float(1.0, "TP1 R-multiple",                     minval=0.5,maxval=4.0, step=0.25, group=grpCore)
-vsTP2R      = input.float(1.4, "TP2 R-multiple",                     minval=1.0,maxval=6.0, step=0.25, group=grpCore)
+vsTP2R      = input.float(1.3, "TP2 R-multiple",                     minval=1.0,maxval=6.0, step=0.25, group=grpCore)
 trailAtr    = input.float(0.3, "Trail SL ATR Multiplier (unused — trail off for 5m)", minval=0.1,maxval=3.0, step=0.1,  group=grpCore)
 // ── Simple Mode: skip TP1 partial — hold full position to SL or TP2 only ──
 useSimpleMode   = input.bool(true,  "⚡ Simple Mode (SL + TP2 only — no TP1 partial)", group=grpCore)
@@ -45,6 +45,15 @@ breakoutCtxBars = input.int(8,     "Range lookback bars",                    min
 // ── SL Cooldown After Loss ──
 useSlCooldown   = input.bool(false, "⏸️ SL Cooldown (pause N bars after SL hit)", group=grpFilt)
 slCooldownBars  = input.int(5,     "Cooldown bars after SL hit",             minval=1, maxval=20, group=grpFilt)
+// ── Momentum Quality Filters ──
+// Filter A: Min absolute body — prevents signal when chop is low and threshold drops too small
+// Filter B: Body/Range ratio  — prevents signal on wick-heavy candles with weak net direction
+useMinBody   = input.bool(true,  "🔴 Min Absolute Body (block tiny-chop signals)", group=grpFilt,
+  tooltip="Body must be ≥ N pts regardless of dynamic burst threshold.\nPrevents entries when chop is tiny and threshold drops below meaningful size.\nSuggested: 200 pts for BTC 5m")
+minBodyPts   = input.float(250.0, "Min body pts (absolute)", minval=50, maxval=1000, step=10, group=grpFilt)
+useBodyRatio = input.bool(false,  "📐 Body/Range Ratio (block wick-heavy candles)", group=grpFilt,
+  tooltip="Candle body must be ≥ X% of full high-low range.\nFilters spike candles that reverse — body looks big but wick eats it.\nSuggested: 0.60-0.70 for BTC 5m")
+minBodyRatio = input.float(0.65,  "Min body/range ratio",   minval=0.30, maxval=0.95, step=0.05, group=grpFilt)
 
 grpSess = "Session Filter (IST = UTC+5:30)"
 useSession  = input.bool(false,  "Enable Session Filter", group=grpSess)
@@ -57,7 +66,7 @@ asianOpen   = input.int(6,     "Asian Open   (IST hr)", minval=0, maxval=12, gro
 asianClose  = input.int(10,    "Asian Close  (IST hr)", minval=0, maxval=12, group=grpSess)
 
 grpRisk = "Risk / Journal"
-fixedLot    = input.float(0.1, "Fixed Lot (for P&L)",         minval=0.001, maxval=10,  step=0.001, group=grpRisk)
+fixedLot    = input.float(0.10, "Fixed Lot (for P&L)",         minval=0.001, maxval=10,  step=0.001, group=grpRisk)
 startBal    = input.float(500,  "Start Balance ($)",            minval=10,   step=100,              group=grpRisk)
 useCompound = input.bool(true,  "Enable Compound Lots",         group=grpRisk)
 
@@ -69,6 +78,19 @@ grpSlipSim    = "Slippage Simulation (Live Reality Check)"
 useSlipSim    = input.bool(false, "Slippage Sim ON — show live-adjusted journal", group=grpSlipSim)
 simSlipPts    = input.float(50.0, "Simulated Slippage (pts) — avg live entry cost", minval=1, maxval=500, step=5, group=grpSlipSim)
 maxCompMult = input.float(10,  "Max Compound Multiplier",      minval=1.0,  maxval=10.0, step=0.5,  group=grpRisk)
+
+// ── Early Entry Timing ──────────────────────────────────────────────────────
+// When ON: alert fires N seconds before bar close instead of waiting for confirmation.
+// OFF (default): original behaviour — fires on barstate.isconfirmed only.
+grpTiming  = "⏰ Early Entry"
+early_on   = input.bool(false, "Fire signal before bar close",
+               group   = grpTiming,
+               tooltip = "ON  → fires N seconds before candle close (real-time bars only).\nOFF → fires on confirmed bar close (default, same as before).")
+early_secs = input.int(5, "Seconds before close",
+               minval  = 1,
+               maxval  = 55,
+               group   = grpTiming,
+               tooltip = "5  → fires at 4m55s on a 5m chart\n10 → fires at 4m50s\n55 → fires at 4m05s")
 
 grpDisp = "Display"
 showEmaLine = input.bool(true,  "Show EMA line",        group=grpDisp)
@@ -95,6 +117,12 @@ chopAvgTR /= vsLookback
 burstThreshold = chopAvgTR * vsBurstMult
 isBurstBull    = candleBody >= burstThreshold and close > open
 isBurstBear    = candleBody >= burstThreshold and close < open
+
+// ── Momentum Quality Filters ──
+candleRange    = high - low
+bodyRangeRatio = candleRange > 0 ? candleBody / candleRange : 0.0
+minBodyOK      = not useMinBody   or candleBody >= minBodyPts
+bodyRatioOK    = not useBodyRatio or bodyRangeRatio >= minBodyRatio
 
 vsSLDist = atr5[1] * vsSLMult
 
@@ -160,17 +188,19 @@ var int   tEntryT      = na
 var int   tEntryBar    = na      // bar_index when entry fired — blocks same-bar exits
 var string tSess       = ""
 var bool  _needEntryT  = false   // deferred: set tEntryT on next bar open
+var float tMaxFav      = na      // running max favorable excursion for current trade (pts)
 
 var line ln_entry = na
 var line ln_sl    = na
 var line ln_tp1   = na
 var line ln_tp2   = na
 
-var int   statTrades = 0
-var int   statWins   = 0
-var float statPts    = 0.0
-var float statPnl    = 0.0
-var float balance    = startBal
+var int   statTrades   = 0
+var int   statWins     = 0
+var int   statSimWins  = 0   // wins after slippage (dynamic — not fixedTPpts-based)
+var float statPts      = 0.0
+var float statPnl      = 0.0
+var float balance      = startBal
 
 // ── Journal arrays ──
 var int[]    jDir     = array.new_int(0)
@@ -185,6 +215,7 @@ var string[] jSess    = array.new_string(0)
 var float[]  jLots    = array.new_float(0)
 var float[]  jCmpdPnl = array.new_float(0)
 var float[]  jSL      = array.new_float(0)
+var float[]  jMFE     = array.new_float(0)  // max favorable excursion per closed trade (pts)
 
 // ── Compound lot state ──
 var float compoundLots    = fixedLot
@@ -193,7 +224,7 @@ var float baseLot         = fixedLot
 var float calcLots        = fixedLot
 var float at_cmpd_acc     = 0.0
 
-pushJournal(_dir, _inT, _outT, _entPx, _exitPx, _pts, _stat, _sess, _lots, _cmpdPnl, _slPx) =>
+pushJournal(_dir, _inT, _outT, _entPx, _exitPx, _pts, _stat, _sess, _lots, _cmpdPnl, _slPx, _mfe) =>
     _pnl = math.round(_pts * fixedLot, 2)
     array.unshift(jDir,     _dir)
     array.unshift(jInT,     _inT)
@@ -207,6 +238,7 @@ pushJournal(_dir, _inT, _outT, _entPx, _exitPx, _pts, _stat, _sess, _lots, _cmpd
     array.unshift(jLots,    _lots)
     array.unshift(jCmpdPnl, _cmpdPnl)
     array.unshift(jSL,      _slPx)
+    array.unshift(jMFE,     _mfe)
     if array.size(jDir) > maxJRows
         array.pop(jDir)
         array.pop(jInT)
@@ -220,6 +252,7 @@ pushJournal(_dir, _inT, _outT, _entPx, _exitPx, _pts, _stat, _sess, _lots, _cmpd
         array.pop(jLots)
         array.pop(jCmpdPnl)
         array.pop(jSL)
+        array.pop(jMFE)
     _pnl
 
 deleteLines() =>
@@ -238,10 +271,43 @@ if _needEntryT and tDir != 0
     _needEntryT := false
 
 // ═══════════════════════════════════════════════════════════
-// SIGNALS
+// EARLY-ENTRY GATE
+// KEY RULE: journal / labels / state always use barstate.isconfirmed
+// so toggling early_on NEVER wipes historical signals or the journal.
+// When early_on is ON a SEPARATE alert fires N seconds before close.
 // ═══════════════════════════════════════════════════════════
-volSurgeLong  = isBurstBull and emaOK_long  and gateOK_long  and trend4hOK_long  and adxOK and breakoutCtxOK_long  and slCooldownAfterLossOK and sessionOK and cooldownOK and tDir == 0 and barstate.isconfirmed
-volSurgeShort = isBurstBear and emaOK_short and gateOK_short and trend4hOK_short and adxOK and breakoutCtxOK_short and slCooldownAfterLossOK and sessionOK and cooldownOK and tDir == 0 and barstate.isconfirmed
+_tf_ms        = timeframe.in_seconds(timeframe.period) * 1000   // 300 000 ms for 5m
+_bar_close_ms = time + _tf_ms                                    // expected close timestamp
+_secs_left    = (_bar_close_ms - timenow) / 1000.0              // live countdown (seconds)
+_early_window = barstate.isrealtime and _secs_left <= early_secs and _secs_left > 0
+
+// Shared signal conditions without any bar-state gate (reused below)
+_sigCondLong  = isBurstBull and emaOK_long  and gateOK_long  and trend4hOK_long  and adxOK and breakoutCtxOK_long  and slCooldownAfterLossOK and sessionOK and cooldownOK and minBodyOK and bodyRatioOK and tDir == 0
+_sigCondShort = isBurstBear and emaOK_short and gateOK_short and trend4hOK_short and adxOK and breakoutCtxOK_short and slCooldownAfterLossOK and sessionOK and cooldownOK and minBodyOK and bodyRatioOK and tDir == 0
+
+// Pre-compute SL/TP at current live price — needed for early-alert JSON
+_ea_slDistL = (useFixedSLTP or useFixedSLOnly) ? fixedSLpts          : (usePrevCandleSL ? (close - low[1])  : vsSLDist)
+_ea_slL     = (useFixedSLTP or useFixedSLOnly) ? (close - fixedSLpts): (usePrevCandleSL ? low[1]            : (close - vsSLDist))
+_ea_tp1L    = useFixedSLTP ? (close + fixedTPpts) : (close + vsSLDist * vsTP1R)
+_ea_tp2L    = useFixedSLTP ? (close + fixedTPpts) : (close + vsSLDist * vsTP2R)
+_ea_slDistS = (useFixedSLTP or useFixedSLOnly) ? fixedSLpts          : (usePrevCandleSL ? (high[1] - close) : vsSLDist)
+_ea_slS     = (useFixedSLTP or useFixedSLOnly) ? (close + fixedSLpts): (usePrevCandleSL ? high[1]           : (close + vsSLDist))
+_ea_tp1S    = useFixedSLTP ? (close - fixedTPpts) : (close - vsSLDist * vsTP1R)
+_ea_tp2S    = useFixedSLTP ? (close - fixedTPpts) : (close - vsSLDist * vsTP2R)
+
+// ── Early alerts: fire ONCE in the last N seconds of the live bar ──────────
+// alert.freq_once_per_bar ensures single fire even across multiple ticks.
+// Suppressed on historical bars (barstate.isrealtime is false there).
+if early_on and _sigCondLong and _early_window
+    alert('{"signal":"BUY","secret":"VolSurge2026#Railway$BTC","sl_dist":' + str.tostring(math.round(_ea_slDistL,1)) + ',"sl":' + str.tostring(math.round(_ea_slL,1)) + ',"tp1":' + str.tostring(math.round(_ea_tp1L,1)) + ',"tp2":' + str.tostring(math.round(_ea_tp2L,1)) + ',"pine_entry_px":' + str.tostring(math.round(close,1)) + ',"pine_time":' + str.tostring(timenow) + ',"timeframe":"' + timeframe.period + '","bar_time":' + str.tostring(time) + '}', alert.freq_once_per_bar)
+if early_on and _sigCondShort and _early_window
+    alert('{"signal":"SELL","secret":"VolSurge2026#Railway$BTC","sl_dist":' + str.tostring(math.round(_ea_slDistS,1)) + ',"sl":' + str.tostring(math.round(_ea_slS,1)) + ',"tp1":' + str.tostring(math.round(_ea_tp1S,1)) + ',"tp2":' + str.tostring(math.round(_ea_tp2S,1)) + ',"pine_entry_px":' + str.tostring(math.round(close,1)) + ',"pine_time":' + str.tostring(timenow) + ',"timeframe":"' + timeframe.period + '","bar_time":' + str.tostring(time) + '}', alert.freq_once_per_bar)
+
+// ═══════════════════════════════════════════════════════════
+// SIGNALS  — always confirmed close so journal is never affected
+// ═══════════════════════════════════════════════════════════
+volSurgeLong  = _sigCondLong  and barstate.isconfirmed
+volSurgeShort = _sigCondShort and barstate.isconfirmed
 
 if volSurgeLong or volSurgeShort
     cooldownLeft := vsCooldown
@@ -275,8 +341,9 @@ if volSurgeLong
       "  TP2(50%): " + str.tostring(math.round(tTP2,1)),
       color=color.new(#1a1400,5), textcolor=color.new(#ffeb3b,0),
       style=label.style_label_up, size=size.small)
-    // ── v5: Entry alert — includes sl, tp1, tp2, timeframe, bar_time for bot ──
-    alert('{"signal":"BUY","secret":"VolSurge2026#Railway$BTC","sl_dist":' + str.tostring(math.round(tSLDist,1)) + ',"sl":' + str.tostring(math.round(tSL,1)) + ',"tp1":' + str.tostring(math.round(tTP1,1)) + ',"tp2":' + str.tostring(math.round(tTP2,1)) + ',"pine_entry_px":' + str.tostring(math.round(tEntry,1)) + ',"pine_time":' + str.tostring(timenow) + ',"timeframe":"' + timeframe.period + '","bar_time":' + str.tostring(time) + '}', alert.freq_once_per_bar)
+    // ── v5: Entry alert — skipped when early_on (early block above already fired) ──
+    if not early_on
+        alert('{"signal":"BUY","secret":"VolSurge2026#Railway$BTC","sl_dist":' + str.tostring(math.round(tSLDist,1)) + ',"sl":' + str.tostring(math.round(tSL,1)) + ',"tp1":' + str.tostring(math.round(tTP1,1)) + ',"tp2":' + str.tostring(math.round(tTP2,1)) + ',"pine_entry_px":' + str.tostring(math.round(tEntry,1)) + ',"pine_time":' + str.tostring(timenow) + ',"timeframe":"' + timeframe.period + '","bar_time":' + str.tostring(time) + '}', alert.freq_once_per_bar)
 
 // ═══════════════════════════════════════════════════════════
 // ENTER SHORT
@@ -307,8 +374,9 @@ if volSurgeShort
       "  TP2(50%): " + str.tostring(math.round(tTP2,1)),
       color=color.new(#1a0800,5), textcolor=color.new(#ff6d00,0),
       style=label.style_label_down, size=size.small)
-    // ── v5: Entry alert — includes sl, tp1, tp2, timeframe, bar_time for bot ──
-    alert('{"signal":"SELL","secret":"VolSurge2026#Railway$BTC","sl_dist":' + str.tostring(math.round(tSLDist,1)) + ',"sl":' + str.tostring(math.round(tSL,1)) + ',"tp1":' + str.tostring(math.round(tTP1,1)) + ',"tp2":' + str.tostring(math.round(tTP2,1)) + ',"pine_entry_px":' + str.tostring(math.round(tEntry,1)) + ',"pine_time":' + str.tostring(timenow) + ',"timeframe":"' + timeframe.period + '","bar_time":' + str.tostring(time) + '}', alert.freq_once_per_bar)
+    // ── v5: Entry alert — skipped when early_on (early block above already fired) ──
+    if not early_on
+        alert('{"signal":"SELL","secret":"VolSurge2026#Railway$BTC","sl_dist":' + str.tostring(math.round(tSLDist,1)) + ',"sl":' + str.tostring(math.round(tSL,1)) + ',"tp1":' + str.tostring(math.round(tTP1,1)) + ',"tp2":' + str.tostring(math.round(tTP2,1)) + ',"pine_entry_px":' + str.tostring(math.round(tEntry,1)) + ',"pine_time":' + str.tostring(timenow) + ',"timeframe":"' + timeframe.period + '","bar_time":' + str.tostring(time) + '}', alert.freq_once_per_bar)
 
 // ═══════════════════════════════════════════════════════════
 // MANAGE LONG
@@ -328,6 +396,9 @@ if tDir == 1
     // After TP1: remaining 50% runs to TP2 or hits original SL.
     // _exitOK: intrabar — fires as soon as high/low touches level (matches real limit/stop fills)
     _exitOK = bar_index != tEntryBar
+
+    // ── MFE: track highest point reached above entry ──
+    tMaxFav := na(tMaxFav) ? math.max(0.0, high - tEntry) : math.max(tMaxFav, high - tEntry)
 
     // ── TP1: 50% partial booking (disabled in Simple Mode) ──
     if not useSimpleMode and _exitOK and not tTP1Hit and high >= tTP1
@@ -349,16 +420,19 @@ if tDir == 1
         at_cmpd_acc     += _cmpd_pnl
         consecutiveWins += 1
         compoundLots    := math.min(baseLot * (consecutiveWins + 1), baseLot * maxCompMult)
-        _rpnl     = pushJournal(1, tEntryT, time, tEntry, tTP2, _pts, _statStr, tSess, calcLots, _cmpd_pnl, tSL)
+        _rpnl     = pushJournal(1, tEntryT, time, tEntry, tTP2, _pts, _statStr, tSess, calcLots, _cmpd_pnl, tSL, float(na))  // TP win: true MFE unknowable after exit
         statTrades += 1
         statWins   += 1
+        if (_pts - simSlipPts) > 0
+            statSimWins += 1
         statPts    += _pts
         statPnl    += _rpnl
         balance    += _rpnl
         label.new(bar_index, tTP2, _statStr + "  +" + str.tostring(_pts) + "pts", color=color.new(#00e676,10), textcolor=color.black, style=label.style_label_left, size=size.small)
         alert('{"signal":"TP2_HIT","secret":"VolSurge2026#Railway$BTC","direction":"BUY","tp2_price":' + str.tostring(math.round(tTP2,1)) + ',"pine_time":' + str.tostring(timenow) + ',"timeframe":"' + timeframe.period + '","bar_time":' + str.tostring(time) + '}', alert.freq_once_per_bar)
         deleteLines()
-        tDir := 0
+        tDir    := 0
+        tMaxFav := na
 
     // ── SL: full or remaining 50% hits original SL ──
     else if _exitOK and low <= tSL
@@ -370,7 +444,7 @@ if tDir == 1
         at_cmpd_acc     += _cmpd_pnl
         consecutiveWins := 0
         compoundLots    := baseLot
-        _rpnl     = pushJournal(1, tEntryT, time, tEntry, tSL, _pts, _statStr, tSess, calcLots, _cmpd_pnl, tSL)
+        _rpnl     = pushJournal(1, tEntryT, time, tEntry, tSL, _pts, _statStr, tSess, calcLots, _cmpd_pnl, tSL, nz(tMaxFav, 0.0))
         statTrades += 1
         statPts    += _pts
         statPnl    += _rpnl
@@ -379,7 +453,8 @@ if tDir == 1
         if useSlCooldown
             slCooldownLeft := slCooldownBars
         deleteLines()
-        tDir := 0
+        tDir    := 0
+        tMaxFav := na
 
 // ═══════════════════════════════════════════════════════════
 // MANAGE SHORT
@@ -399,6 +474,9 @@ if tDir == -1
     // After TP1: remaining 50% runs to TP2 or hits original SL.
     // _exitOK: intrabar — fires as soon as high/low touches level (matches real limit/stop fills)
     _exitOK = bar_index != tEntryBar
+
+    // ── MFE: track lowest point reached below entry ──
+    tMaxFav := na(tMaxFav) ? math.max(0.0, tEntry - low) : math.max(tMaxFav, tEntry - low)
 
     // ── TP1: 50% partial booking (disabled in Simple Mode) ──
     if not useSimpleMode and _exitOK and not tTP1Hit and low <= tTP1
@@ -420,16 +498,19 @@ if tDir == -1
         at_cmpd_acc     += _cmpd_pnl
         consecutiveWins += 1
         compoundLots    := math.min(baseLot * (consecutiveWins + 1), baseLot * maxCompMult)
-        _rpnl     = pushJournal(-1, tEntryT, time, tEntry, tTP2, _pts, _statStr, tSess, calcLots, _cmpd_pnl, tSL)
+        _rpnl     = pushJournal(-1, tEntryT, time, tEntry, tTP2, _pts, _statStr, tSess, calcLots, _cmpd_pnl, tSL, float(na))  // TP win: true MFE unknowable after exit
         statTrades += 1
         statWins   += 1
+        if (_pts - simSlipPts) > 0
+            statSimWins += 1
         statPts    += _pts
         statPnl    += _rpnl
         balance    += _rpnl
         label.new(bar_index, tTP2, _statStr + "  +" + str.tostring(_pts) + "pts", color=color.new(#00e676,10), textcolor=color.black, style=label.style_label_left, size=size.small)
         alert('{"signal":"TP2_HIT","secret":"VolSurge2026#Railway$BTC","direction":"SELL","tp2_price":' + str.tostring(math.round(tTP2,1)) + ',"pine_time":' + str.tostring(timenow) + ',"timeframe":"' + timeframe.period + '","bar_time":' + str.tostring(time) + '}', alert.freq_once_per_bar)
         deleteLines()
-        tDir := 0
+        tDir    := 0
+        tMaxFav := na
 
     // ── SL: full or remaining 50% hits original SL ──
     else if _exitOK and high >= tSL
@@ -441,7 +522,7 @@ if tDir == -1
         at_cmpd_acc     += _cmpd_pnl
         consecutiveWins := 0
         compoundLots    := baseLot
-        _rpnl     = pushJournal(-1, tEntryT, time, tEntry, tSL, _pts, _statStr, tSess, calcLots, _cmpd_pnl, tSL)
+        _rpnl     = pushJournal(-1, tEntryT, time, tEntry, tSL, _pts, _statStr, tSess, calcLots, _cmpd_pnl, tSL, nz(tMaxFav, 0.0))
         statTrades += 1
         statPts    += _pts
         statPnl    += _rpnl
@@ -450,7 +531,8 @@ if tDir == -1
         if useSlCooldown
             slCooldownLeft := slCooldownBars
         deleteLines()
-        tDir := 0
+        tDir    := 0
+        tMaxFav := na
 
 // ═══════════════════════════════════════════════════════════
 // PLOTS
@@ -466,7 +548,7 @@ plotshape(volSurgeShort, title="VS SELL", style=shape.diamond, location=location
 // ═══════════════════════════════════════════════════════════
 // STATUS TABLE  (top-right)
 // ═══════════════════════════════════════════════════════════
-var table statusTbl = table.new(position.top_right, 2, 7,
+var table statusTbl = table.new(position.top_right, 2, 9,
   bgcolor=color.new(#0d0d0d,5), border_color=color.new(#333333,0), border_width=1,
   frame_color=color.new(#555555,0), frame_width=1)
 
@@ -480,24 +562,35 @@ if barstate.islast and showTable
     _bCol = candleBody >= burstThreshold ? color.new(#26a69a,0) : color.gray
     table.cell(statusTbl, 0, 3, "Current body", text_color=color.gray, text_size=size.small)
     table.cell(statusTbl, 1, 3, str.tostring(math.round(candleBody,1)) + " pts" + (candleBody >= burstThreshold ? " ✓" : ""), text_color=_bCol, text_size=size.small)
+    // ── Min Body filter row ──
+    _mbCol = minBodyOK ? color.new(#26a69a,0) : color.new(#f23645,0)
+    _mbStr = not useMinBody ? "OFF" : (candleBody >= minBodyPts ? str.tostring(math.round(candleBody,0)) + " ≥ " + str.tostring(minBodyPts) + " ✓" : str.tostring(math.round(candleBody,0)) + " < " + str.tostring(minBodyPts) + " ✗")
+    table.cell(statusTbl, 0, 4, "Min Body",     text_color=color.gray, text_size=size.small)
+    table.cell(statusTbl, 1, 4, _mbStr,         text_color=_mbCol, text_size=size.small)
+    // ── Body/Range ratio row ──
+    _brRound = math.round(bodyRangeRatio, 2)
+    _brCol   = bodyRatioOK ? color.new(#26a69a,0) : color.new(#f23645,0)
+    _brStr   = not useBodyRatio ? "OFF" : (bodyRatioOK ? str.tostring(_brRound) + "x ≥ " + str.tostring(minBodyRatio) + " ✓" : str.tostring(_brRound) + "x < " + str.tostring(minBodyRatio) + " ✗")
+    table.cell(statusTbl, 0, 5, "Body/Range",   text_color=color.gray, text_size=size.small)
+    table.cell(statusTbl, 1, 5, _brStr,         text_color=_brCol, text_size=size.small)
     _sStr = inLondon ? "London ✓" : inNY ? "NY ✓" : inAsian ? "Asian ✓" : "Closed"
     _sCol = sessionOK ? color.new(#26a69a,0) : color.gray
-    table.cell(statusTbl, 0, 4, "Session",      text_color=color.gray, text_size=size.small)
-    table.cell(statusTbl, 1, 4, _sStr,          text_color=_sCol,  text_size=size.small)
+    table.cell(statusTbl, 0, 6, "Session",      text_color=color.gray, text_size=size.small)
+    table.cell(statusTbl, 1, 6, _sStr,          text_color=_sCol,  text_size=size.small)
     _eStr = aboveEMA ? "Above ▲" : "Below ▼"
     _eCol = aboveEMA ? color.new(#26a69a,0) : color.new(#f23645,0)
-    table.cell(statusTbl, 0, 5, "3m EMA",       text_color=color.gray, text_size=size.small)
-    table.cell(statusTbl, 1, 5, _eStr,          text_color=_eCol,  text_size=size.small)
+    table.cell(statusTbl, 0, 7, "3m EMA",       text_color=color.gray, text_size=size.small)
+    table.cell(statusTbl, 1, 7, _eStr,          text_color=_eCol,  text_size=size.small)
     _hStr = bias1hBull ? "Bull ▲" : bias1hBear ? "Bear ▼" : "Neutral"
     _hCol = bias1hBull ? color.new(#26a69a,0) : bias1hBear ? color.new(#f23645,0) : color.gray
-    table.cell(statusTbl, 0, 6, "1H Bias",      text_color=color.gray, text_size=size.small)
-    table.cell(statusTbl, 1, 6, _hStr,          text_color=_hCol,  text_size=size.small)
+    table.cell(statusTbl, 0, 8, "1H Bias",      text_color=color.gray, text_size=size.small)
+    table.cell(statusTbl, 1, 8, _hStr,          text_color=_hCol,  text_size=size.small)
 
 // ═══════════════════════════════════════════════════════════
 // JOURNAL TABLE  (bottom-right)
 // Columns: Dir | Date | In | Out | Entry$ | Exit$ | Pts | Lots | Cmpd P&L | Fix P&L | Status/Sess
 // ═══════════════════════════════════════════════════════════
-var table jTbl = table.new(position.bottom_right, 12, 16,
+var table jTbl = table.new(position.bottom_right, 13, 16,
   bgcolor=color.new(#0d0d0d,5), border_color=color.new(#333333,0), border_width=1,
   frame_color=color.new(#555555,0), frame_width=1)
 
@@ -525,6 +618,7 @@ if barstate.islast and showJournal
     table.cell(jTbl, 9,  0, "Cmpd P&L",      text_color=_hfg, text_size=size.small, bgcolor=_hbg)
     table.cell(jTbl, 10, 0, _pnlHdr,         text_color=_hfg, text_size=size.small, bgcolor=_hbg)
     table.cell(jTbl, 11, 0, "Status / Sess", text_color=_hfg, text_size=size.small, bgcolor=_hbg)
+    table.cell(jTbl, 12, 0, "MFE pts",       text_color=color.new(#ff9800,0), text_size=size.small, bgcolor=_hbg)
 
     _n = array.size(jDir)
     for r = 0 to maxJRows - 1
@@ -541,7 +635,8 @@ if barstate.islast and showJournal
             _se   = array.get(jSess,    r)
             _lots = array.get(jLots,    r)
             _cpnl = array.get(jCmpdPnl, r)
-            _sl   = array.size(jSL) > r ? array.get(jSL, r) : na
+            _sl   = array.size(jSL)  > r ? array.get(jSL,  r) : na
+            _mfe  = array.size(jMFE) > r ? array.get(jMFE, r) : na
             // ── Slippage simulation ───────────────────────────────────────
             // WIN:  entry shifts by slip → TP further → net pts = pts - simSlipPts
             // LOSS: SL is fixed distance from fill → pts unchanged
@@ -568,8 +663,9 @@ if barstate.islast and showJournal
             table.cell(jTbl, 9,  _row, (_cpnl >= 0 ? "+$" : "-$") + str.tostring(math.abs(_cpnl)),        text_color=_pc,                   text_size=size.small, bgcolor=_bg)
             table.cell(jTbl, 10, _row, (_disp_pnl >= 0 ? "+$" : "-$") + str.tostring(math.abs(_disp_pnl)),text_color=_pc,                   text_size=size.small, bgcolor=_bg)
             table.cell(jTbl, 11, _row, _st + " · " + _se,                                                 text_color=_pc,                   text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 12, _row, na(_mfe) ? "≥TP ✓" : "+" + str.tostring(math.round(_mfe, 0)),       text_color=na(_mfe) ? color.new(#26a69a,0) : color.new(#ff9800,0), text_size=size.small, bgcolor=_bg)
         else
-            for c = 0 to 11
+            for c = 0 to 12
                 table.cell(jTbl, c, _row, "", text_size=size.small, bgcolor=color.new(#111111,0))
 
     _liveRow = maxJRows + 1
@@ -592,8 +688,10 @@ if barstate.islast and showJournal
         table.cell(jTbl, 9,  _liveRow, (_lCpnl >= 0 ? "+$" : "-$") + str.tostring(math.abs(_lCpnl)),  text_color=_lCol,                 text_size=size.small, bgcolor=_lbg)
         table.cell(jTbl, 10, _liveRow, (_lPnl  >= 0 ? "+$" : "-$") + str.tostring(math.abs(_lPnl)),   text_color=_lCol,                 text_size=size.small, bgcolor=_lbg)
         table.cell(jTbl, 11, _liveRow, tTP1Hit ? "TP1 Hit · 50% Booked" : "Open",                      text_color=color.yellow,          text_size=size.small, bgcolor=_lbg)
+        _lMFE = tDir == 1 ? math.max(0.0, high - tEntry) : math.max(0.0, tEntry - low)
+        table.cell(jTbl, 12, _liveRow, "+" + str.tostring(math.round(_lMFE, 0)),                        text_color=color.new(#ff9800,0),  text_size=size.small, bgcolor=_lbg)
     else
-        for c = 0 to 11
+        for c = 0 to 12
             table.cell(jTbl, c, _liveRow, "", bgcolor=color.new(#111111,0))
 
     // ── Journal summary: totals of VISIBLE rows only ──────────────
@@ -638,11 +736,25 @@ if barstate.islast and showJournal
     table.cell(jTbl, 9,  _statsRow, _visCPnlStr, text_color=_visCPnlCol, text_size=size.small, bgcolor=_sbg)
     table.cell(jTbl, 10, _statsRow, _visPnlStr,  text_color=_visPnlCol,  text_size=size.small, bgcolor=_sbg)
     table.cell(jTbl, 11, _statsRow, "",           text_color=color.gray,  text_size=size.small, bgcolor=_sbg)
+    // ── MFE stats: min and avg across visible rows ──
+    _mfe_min = float(na)
+    _mfe_sum = 0.0
+    _mfe_cnt = 0
+    for _rm = 0 to _visJN - 1
+        if array.size(jMFE) > _rm
+            _mv = array.get(jMFE, _rm)
+            if not na(_mv) and _mv > 0
+                _mfe_sum += _mv
+                _mfe_cnt += 1
+                _mfe_min := na(_mfe_min) ? _mv : math.min(_mfe_min, _mv)
+    _mfe_avg = _mfe_cnt > 0 ? _mfe_sum / _mfe_cnt : float(na)
+    _mfe_cell = (na(_mfe_min) ? "—" : "↓" + str.tostring(math.round(_mfe_min, 0))) + (na(_mfe_avg) ? "" : " ⌀" + str.tostring(math.round(_mfe_avg, 0)))
+    table.cell(jTbl, 12, _statsRow, _mfe_cell,   text_color=color.new(#ff9800,0), text_size=size.small, bgcolor=_sbg)
 
 // ═══════════════════════════════════════════════════════════
 // ALL-TIME STATS TABLE  (bottom-left)
 // ═══════════════════════════════════════════════════════════
-var table atTbl = table.new(position.bottom_left, 2, 9,
+var table atTbl = table.new(position.bottom_left, 2, 11,
   bgcolor=color.new(#0d0d0d,5), border_color=color.new(#333333,0), border_width=1,
   frame_color=color.new(#555555,0), frame_width=1)
 
@@ -652,9 +764,9 @@ if barstate.islast and showJournal
     //   WIN:  entered late → TP is further → net pts = fixedTPpts - simSlipPts
     //   LOSS: SL is same fixed distance from fill → pts unchanged = -fixedSLpts
     // Formula: sim_pts = statPts - statWins * simSlipPts
-    // sim_wins: TP still reachable if simSlipPts < fixedTPpts (burst moves 300-800pts)
+    // sim_wins: counted live at exit — (_pts - simSlipPts) > 0 (works with dynamic ATR TP)
     _sim_at_pts  = useSlipSim ? statPts - statWins * simSlipPts : statPts
-    _sim_at_wins = useSlipSim ? (simSlipPts < fixedTPpts ? statWins : 0) : statWins
+    _sim_at_wins = useSlipSim ? statSimWins : statWins
 
     _disp_wins = _sim_at_wins
     _disp_pts  = _sim_at_pts
@@ -695,6 +807,21 @@ if barstate.islast and showJournal
     table.cell(atTbl, 1, 7, str.tostring(fixedLot) + " BTC" + (useCompound ? " (cmpd)" : " (fixed)"), text_color=color.new(#d1d5db,0), text_size=_ass, bgcolor=_asbg)
     table.cell(atTbl, 0, 8, "Burst thresh",     text_color=_amc,  text_size=_ass, bgcolor=_asbg)
     table.cell(atTbl, 1, 8, str.tostring(math.round(burstThreshold,1)) + " pts body", text_color=color.new(#ffeb3b,0), text_size=_ass, bgcolor=_asbg)
+    // ── MFE analysis rows ─────────────────────────────────────────────────────
+    _at_mfe_min = float(na)
+    _at_mfe_sum = 0.0
+    _at_mfe_cnt = 0
+    for _am = 0 to array.size(jMFE) - 1
+        _amv = array.get(jMFE, _am)
+        if not na(_amv) and _amv > 0
+            _at_mfe_sum += _amv
+            _at_mfe_cnt += 1
+            _at_mfe_min := na(_at_mfe_min) ? _amv : math.min(_at_mfe_min, _amv)
+    _at_mfe_avg = _at_mfe_cnt > 0 ? _at_mfe_sum / _at_mfe_cnt : float(na)
+    table.cell(atTbl, 0, 9,  "Min MFE",  text_color=_amc, text_size=_ass, bgcolor=_asbg)
+    table.cell(atTbl, 1, 9,  na(_at_mfe_min) ? "no data yet" : "+" + str.tostring(math.round(_at_mfe_min, 0)) + " pts  ← set TP here", text_color=color.new(#ff9800,0), text_size=_ass, bgcolor=_asbg)
+    table.cell(atTbl, 0, 10, "Avg MFE",  text_color=_amc, text_size=_ass, bgcolor=_asbg)
+    table.cell(atTbl, 1, 10, na(_at_mfe_avg) ? "no data yet" : "+" + str.tostring(math.round(_at_mfe_avg, 0)) + " pts", text_color=color.new(#ff9800,0), text_size=_ass, bgcolor=_asbg)
 
 // ═══════════════════════════════════════════════════════════
 // ALERTS
