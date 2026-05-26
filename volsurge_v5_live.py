@@ -820,9 +820,10 @@ def _set_open_trade(
 
     # SL: fill-based (protects actual capital at risk)
     sl_price = round(fill_price - sl_dist, 1) if d == "BUY" else round(fill_price + sl_dist, 1)
-    # TP: signal-based (Pine parity — anchored to bar close, not fill price)
-    # Fallback to fill-based if fill already past pine_tp (extreme slippage edge case)
-    if (d == "BUY" and fill_price >= pine_tp) or (d == "SELL" and fill_price <= pine_tp):
+    # TP: respect FIXED_TP_PTS if set; else signal-based (Pine parity)
+    if FIXED_TP_PTS > 0:
+        tp_price = round(fill_price + FIXED_TP_PTS, 1) if d == "BUY" else round(fill_price - FIXED_TP_PTS, 1)
+    elif (d == "BUY" and fill_price >= pine_tp) or (d == "SELL" and fill_price <= pine_tp):
         tp_price = round(fill_price + sl_dist * TP_R, 1) if d == "BUY" else round(fill_price - sl_dist * TP_R, 1)
     else:
         tp_price = pine_tp
@@ -2590,7 +2591,7 @@ async def dashboard():
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Vol Surge v5 — Live Dashboard</title>
+<title>Vol Surge 5min — {'Paper' if PAPER_MODE else 'Live'} Dashboard</title>
 <style>
   *{{margin:0;padding:0;box-sizing:border-box}}
   body{{background:#080c10;color:#e2e8f0;font-family:'Segoe UI',system-ui,monospace;font-size:13px}}
@@ -2703,8 +2704,16 @@ async def dashboard():
 
   function enableAlerts() {{
     if (!('Notification' in window)) {{ alert('Notifications not supported'); return; }}
+    const btn = document.getElementById('alert-btn');
+    if (localStorage.getItem('vs_alerts') === '1' && Notification.permission === 'granted') {{
+      localStorage.setItem('vs_alerts', '0');
+      btn.textContent = '🔕 Enable Alerts';
+      btn.style.background = '';
+      btn.style.color = '';
+      btn.style.borderColor = '';
+      return;
+    }}
     Notification.requestPermission().then(p => {{
-      const btn = document.getElementById('alert-btn');
       if (p === 'granted') {{
         btn.textContent = '🔔 Alerts ON';
         btn.style.background = '#14532d';
@@ -2714,7 +2723,7 @@ async def dashboard():
         playSignalSound();
         sendNotification('✅ Vol Surge Alerts ON', 'You will be notified when a signal fires');
       }} else {{
-        btn.textContent = '🔕 Alerts OFF';
+        btn.textContent = '🔕 Enable Alerts';
         localStorage.setItem('vs_alerts', '0');
       }}
     }});
@@ -2857,7 +2866,7 @@ async def dashboard():
 <!-- HEADER -->
 <div class="hdr">
   <div>
-    <h1>⚡ Vol Surge v5 — Live Dashboard</h1>
+    <h1>⚡ Vol Surge 5min — {'📄 Paper' if PAPER_MODE else '🟢 Live'} Dashboard</h1>
     <div style="color:#6b7280;font-size:11px;margin-top:3px;">BTCUSD · Delta Exchange India · <span style="color:#4ade80;font-weight:600;">5m candles</span> · WebSocket-native · <span style="color:#4ade80;">live price SSE ~200ms</span> · page reload 30s · {now_ist}</div>
   </div>
   <div style="text-align:right;display:flex;flex-direction:column;align-items:flex-end;gap:6px;">

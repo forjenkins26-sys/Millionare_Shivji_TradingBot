@@ -10,6 +10,6 @@ RUN pip install --no-cache-dir -r requirements_v5.txt
 COPY *.py ./
 
 # Create data/logs dirs (volume mount will overlay /data at runtime)
-RUN mkdir -p /data /logs
+RUN mkdir -p /data /data/logs /logs
 
 CMD ["uvicorn", "volsurge_v5_live:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]
