@@ -1105,14 +1105,20 @@ def _position_monitor():
                        f"Price: {price:,.1f} | SL: {sl:,.1f}\n"
                        f"Placing market close...")
 
-                    # Cancel the outstanding TP order
-                    tp_oid = open_trade.get("tp_oid")
-                    if tp_oid:
-                        _delete(f"/v2/orders/{tp_oid}")
-                        _log(f"[MON] TP order {tp_oid} cancelled on SL trigger")
-
-                    # Place market close (reduce-only)
+                    # IMPORTANT: Fire market close FIRST — every ms counts.
+                    # Cancel TP in a background thread concurrently so the
+                    # blocking DELETE call does not delay the market order.
                     close_side = "sell" if d == "BUY" else "buy"
+                    tp_oid = open_trade.get("tp_oid")
+
+                    def _cancel_tp_bg():
+                        if tp_oid:
+                            _delete(f"/v2/orders/{tp_oid}")
+                            _log(f"[MON] TP order {tp_oid} cancelled (background) on SL trigger")
+
+                    threading.Thread(target=_cancel_tp_bg, daemon=True, name="tp-cancel-sl").start()
+
+                    # Place market close immediately (reduce-only)
                     close_result = place_market_order(close_side, LOT_SIZE,
                                                       reduce_only=True, ref_price=price)
                     if close_result:
