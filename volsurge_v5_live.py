@@ -1244,8 +1244,10 @@ def _process_entry(
                 _pre_slip = (_cur_px - pine_entry_px) if d == "BUY" else (pine_entry_px - _cur_px)
                 if MAX_PRE_ENTRY_SLIP_PTS > 0:
                     _guard = MAX_PRE_ENTRY_SLIP_PTS          # legacy fixed override
+                elif FIXED_SL_PTS > 0:
+                    _guard = FIXED_SL_PTS                    # use fixed SL pts when configured
                 else:
-                    _guard = sl_dist * 1.0                   # dynamic: 1× sl_dist
+                    _guard = sl_dist * 1.0                   # dynamic: 1× ATR sl_dist
                 if _pre_slip > _guard:
                     _logw(f"ENTRY SKIPPED [PRE-GUARD] price moved {_pre_slip:+.1f}pts > {_guard:.0f}pt guard | signal={pine_entry_px:,.1f} now={_cur_px:,.1f}")
                     tg(
