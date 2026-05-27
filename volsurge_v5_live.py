@@ -106,12 +106,12 @@ USE_HA        = os.getenv("USE_HA_CANDLES", "true").lower() == "true"
 MAX_SIGNAL_AGE_S = int(os.getenv("MAX_SIGNAL_AGE_S", "60"))
 
 # ── Trade parameters ──────────────────────────────────────────────────
-# TP_R: must match Pine's vsTP2R (1.3R — signal-anchored TP)
+# TP_R: TP = entry ± sl_dist × TP_R (env override: TP_R=1.4 in .env)
 TP_R                   = float(os.getenv("TP_R", "1.3"))
 MAX_SLIPPAGE_RATIO     = float(os.getenv("MAX_SLIPPAGE_RATIO", "0.0"))
 MAX_PRE_ENTRY_SLIP_PTS = float(os.getenv("MAX_PRE_ENTRY_SLIP_PTS", "0.0"))  # legacy — superseded by limit entry
 # Limit entry — GTC limit at signal close price; waits for post-burst pullback
-ENTRY_LIMIT_TIMEOUT_S  = int(os.getenv("ENTRY_LIMIT_TIMEOUT_S",  "270"))  # 15m: 270s (30% of bar); cancel if not filled
+ENTRY_LIMIT_TIMEOUT_S  = int(os.getenv("ENTRY_LIMIT_TIMEOUT_S",  "270"))  # 5m: 270s (90% of bar); cancel if not filled
 ENTRY_LIMIT_MAX_DRIFT  = float(os.getenv("ENTRY_LIMIT_MAX_DRIFT", "0.0")) # 0 = auto (1.5 × sl_dist); cancel if price runs this far
 # Fixed SL/TP override — set both > 0 to use fixed pts instead of ATR-based
 FIXED_SL_PTS           = float(os.getenv("FIXED_SL_PTS", "0.0"))   # 0 = dynamic (default)
@@ -3120,7 +3120,7 @@ async def dashboard():
 </div>
 
 <div class="footer">
-  Vol Surge v5 5m · WebSocket-native · TP=1.3R · LOT={LOT_SIZE} BTC · {'LIVE' if not PAPER_MODE else 'PAPER'}
+  Vol Surge v5 5m · WebSocket-native · TP={TP_R}R · LOT={LOT_SIZE} BTC · {'LIVE' if not PAPER_MODE else 'PAPER'}
 </div>
 
 <!-- CUSTOM MODAL -->

@@ -15,7 +15,7 @@ primary_region = 'nrt'
   LOG_DIR = '/data/logs'
 
 [[mounts]]
-  source = 'volsurge_15m_data'
+  source = 'volsurge_5m_data'
   destination = '/data'
 
 [http_service]
