@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-candle_feed.py — Delta Exchange WebSocket candle feed for Vol Surge v5 (5m)
+candle_feed.py — Delta Exchange WebSocket candle feed for Vol Surge v5 (1m)
 ============================================================================
 Responsibilities (ONLY):
-  - Maintain a 300-candle ring buffer of closed 5-minute candles
+  - Maintain a 300-candle ring buffer of closed 1-minute candles
   - Maintain current mark price
   - REST backfill on startup and after reconnect gaps
   - Auto-reconnect with exponential backoff
@@ -43,7 +43,7 @@ _BACKOFF_MAX        = 60.0
 _BACKOFF_MULT       = 2.0
 _HEARTBEAT_INTERVAL = 30.0   # seconds between keepalive pings to Delta
 
-CANDLE_SECONDS = 300   # 5-minute bars — used by scheduled close guard
+CANDLE_SECONDS = 60    # 1-minute bars — used by scheduled close guard
 
 
 # ── Data model ────────────────────────────────────────────────────────────────
@@ -123,7 +123,7 @@ class CandleFeed:
 
     @property
     def is_ready(self) -> bool:
-        """True when backfill loaded ≥ 250 bars (enough for EMA200 warmup on 5m)."""
+        """True when backfill loaded ≥ 250 bars (enough for EMA200 warmup on 1m)."""
         return self._warmed_up and len(self.buffer) >= 250
 
     async def start(self):
@@ -178,7 +178,7 @@ class CandleFeed:
                     f"{REST_URL}/v2/history/candles",
                     params={
                         "symbol":     self.symbol,
-                        "resolution": "5m",   # 5-minute candles
+                        "resolution": "1m",   # 1-minute candles
                         "start":      start_ts,
                         "end":        end_ts,
                     },
@@ -239,7 +239,7 @@ class CandleFeed:
                     f"{REST_URL}/v2/history/candles",
                     params={
                         "symbol":     self.symbol,
-                        "resolution": "5m",   # 5-minute candles
+                        "resolution": "1m",   # 1-minute candles
                         "start":      gap_start,
                         "end":        gap_end,
                     },
@@ -319,7 +319,7 @@ class CandleFeed:
             "type": "subscribe",
             "payload": {
                 "channels": [
-                    {"name": "candlestick_5m", "symbols": [self.symbol]},   # 5-minute candles
+                    {"name": "candlestick_1m", "symbols": [self.symbol]},   # 1-minute candles
                     {"name": "mark_price",     "symbols": [self.symbol]},   # 2s fallback
                     {"name": "l1_orderbook",   "symbols": [self.symbol]},   # 100ms best bid/ask
                     {"name": "system_status"},                               # exchange degradation/maintenance
@@ -327,7 +327,7 @@ class CandleFeed:
             }
         }
         await ws.send(json.dumps(sub))
-        self.log.info(f"[FEED] Subscribed to candlestick_5m + mark_price + l1_orderbook + system_status [{self.symbol}]")
+        self.log.info(f"[FEED] Subscribed to candlestick_1m + mark_price + l1_orderbook + system_status [{self.symbol}]")
 
     async def _heartbeat(self, ws):
         while True:
