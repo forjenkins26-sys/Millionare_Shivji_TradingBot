@@ -4,7 +4,7 @@
 #
 
 app = 'millionare-shivji-tradingbot'
-primary_region = 'bom'
+primary_region = 'nrt'
 
 [build]
   dockerfile = 'Dockerfile'
