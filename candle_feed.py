@@ -50,7 +50,7 @@ CANDLE_SECONDS = 60    # 1-minute bars — used by scheduled close guard
 
 @dataclass
 class Candle:
-    """One closed 5-minute candle."""
+    """One closed 1-minute candle."""
     ts:     int    # candle start (Unix seconds, UTC)
     open:   float
     high:   float
@@ -78,7 +78,7 @@ class Candle:
 
 class CandleFeed:
     """
-    Real-time buffer of closed 5-minute candles from Delta Exchange WebSocket.
+    Real-time buffer of closed 1-minute candles from Delta Exchange WebSocket.
 
     Parameters
     ----------
@@ -170,7 +170,7 @@ class CandleFeed:
         self.log.info(f"[FEED] REST backfill: requesting {count} candles...")
         try:
             end_ts   = int(time.time())
-            start_ts = end_ts - count * 300 - 600   # 5-min bars (300s each) + small buffer
+            start_ts = end_ts - count * 60 - 120    # 1-min bars (60s each) + small buffer
 
             raw = await asyncio.get_event_loop().run_in_executor(
                 None,
@@ -198,10 +198,10 @@ class CandleFeed:
             loaded = 0
             for c in reversed(candles_raw):   # oldest → newest: buffer[-1] = current
                 candle = self._parse_rest_candle(c)
-                # Skip the currently forming bar — bar closes at ts + 300.
+                # Skip the currently forming bar — bar closes at ts + 60.
                 # If bar hasn't closed yet, exclude it so the WebSocket can
                 # emit the real close (avoids dedup-skipping the close callback).
-                if candle and candle.ts + 300 <= now:
+                if candle and candle.ts + 60 <= now:
                     self.buffer.append(candle)
                     self.last_closed = candle
                     loaded += 1
@@ -223,9 +223,9 @@ class CandleFeed:
             await self._backfill(300)
             return
 
-        gap_start  = self.last_closed.ts + 300
+        gap_start  = self.last_closed.ts + 60
         gap_end    = int(time.time())
-        gap_bars   = (gap_end - gap_start) // 300
+        gap_bars   = (gap_end - gap_start) // 60
 
         if gap_bars < 1:
             self.log.info("[FEED] Gap < 1 bar — no REST fill needed")
@@ -252,8 +252,8 @@ class CandleFeed:
             filled = 0
             for c in reversed(candles_raw):
                 candle = self._parse_rest_candle(c)
-                # Only include bars that have fully closed (ts + 300 <= now)
-                if candle and candle.ts > self.last_closed.ts and candle.ts + 300 <= now2:
+                # Only include bars that have fully closed (ts + 60 <= now)
+                if candle and candle.ts > self.last_closed.ts and candle.ts + 60 <= now2:
                     self.buffer.append(candle)
                     self.last_closed = candle
                     filled += 1
@@ -404,7 +404,7 @@ class CandleFeed:
             if self._forming is None:
                 self._forming = dict(ts=raw_ts, open=o, high=h, low=l, close=c, volume=v)
                 self.log.debug(f"[FEED] forming ts={raw_ts}")
-                self._schedule_close_guard(raw_ts)   # force-close at bar_ts+300s if WS is slow
+                self._schedule_close_guard(raw_ts)   # force-close at bar_ts+60s if WS is slow
                 return
 
             if raw_ts != self._forming["ts"]:

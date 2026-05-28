@@ -76,6 +76,15 @@ class SignalConfig:
     use_min_body: bool  = True
     min_body_pts: float = 250.0
 
+    # ── Breakout Context Filter ────────────────────────────────────────────────
+    # Require burst candle to actually break the prior N-bar range.
+    # BUY:  close > ta.highest(high[1], breakout_ctx_bars)
+    # SELL: close < ta.lowest(low[1],   breakout_ctx_bars)
+    # Pine: useBreakoutCtx=false (default OFF), breakoutCtxBars=8
+    # Filters out big bodies inside consolidation that don't break any level.
+    use_breakout_ctx:  bool  = False
+    breakout_ctx_bars: int   = 8    # Pine default: breakoutCtxBars=8
+
     # IST = UTC+5:30 session windows
     london_open:  int   = 11
     london_close: int   = 17
@@ -364,6 +373,22 @@ def compute_indicators(
     # Pine: minBodyOK = not useMinBody or candleBody >= minBodyPts
     min_body_ok = not cfg.use_min_body or candle_body >= cfg.min_body_pts
 
+    # ── Breakout Context Filter ────────────────────────────────────────────────
+    # Pine: recentHigh = ta.highest(high[1], breakoutCtxBars)  (8 bars default)
+    #       recentLow  = ta.lowest(low[1],   breakoutCtxBars)
+    # high[1] = candles[-2], high[N] = candles[-(N+1)]
+    # Window = candles[-(N+1):-1] = N bars before current bar, excl. current.
+    N = cfg.breakout_ctx_bars
+    if cfg.use_breakout_ctx and len(candles) >= N + 2:
+        prior = candles[-(N + 1):-1]  # high[1]..high[N] in Pine notation
+        prior_range_high  = max(c.high for c in prior)
+        prior_range_low   = min(c.low  for c in prior)
+        breakout_ctx_bull = curr.close > prior_range_high
+        breakout_ctx_bear = curr.close < prior_range_low
+    else:
+        breakout_ctx_bull = True   # filter OFF or insufficient bars → always pass
+        breakout_ctx_bear = True
+
     # ── EMA200 (Pine line 46) ─────────────────────────────────────────────────
     closes      = [c.close for c in candles]
     ema_series  = compute_ema_series(closes, cfg.ema_length)
@@ -388,9 +413,9 @@ def compute_indicators(
     # ── Signal (Pine lines 167-168) ───────────────────────────────────────────
     signal = ""
     if not in_trade and cooldown_ok and session_ok:
-        if is_burst_bull and ema_ok_long and gate_ok_long and min_body_ok:
+        if is_burst_bull and ema_ok_long and gate_ok_long and min_body_ok and breakout_ctx_bull:
             signal = "BUY"
-        elif is_burst_bear and ema_ok_short and gate_ok_short and min_body_ok:
+        elif is_burst_bear and ema_ok_short and gate_ok_short and min_body_ok and breakout_ctx_bear:
             signal = "SELL"
 
     return IndicatorState(
