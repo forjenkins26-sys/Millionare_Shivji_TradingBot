@@ -22,7 +22,7 @@ primary_region = 'nrt'
   BREAKOUT_CTX_BARS = '5'
 
 [[mounts]]
-  source = 'volsurge_15m_data'
+  source = 'volsurge_5m_data'
   destination = '/data'
 
 [http_service]
