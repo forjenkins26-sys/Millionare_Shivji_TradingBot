@@ -1,5 +1,5 @@
 //@version=5
-indicator("Vol Surge v5 BTC 5min Bot — Delta Algo BOt [Standalone]", overlay=true, max_lines_count=500, max_labels_count=300, max_bars_back=500)
+indicator("Live - volsurge_1m_Mummy_Live, tp 30 ,sl 15 [LIMIT@HA-CLOSE]", overlay=true, max_lines_count=500, max_labels_count=300, max_bars_back=5000)
 
 
 // ═══════════════════════════════════════════════════════════
@@ -22,10 +22,11 @@ vsCooldown  = input.int(3,     "Cooldown bars after signal",         minval=0,  
 // Mode B — useFixedSLOnly ON : SL = fixedSLpts, TP = ATR-based dynamic (captures full burst)
 // Both OFF                   : original ATR-based SL and TP (unchanged)
 grpFixed      = "Fixed SL/TP (Test Mode)"
-useFixedSLTP  = input.bool(false, "Mode A — Fixed SL and TP (both fixed pts)", group=grpFixed)
+useFixedSLTP  = input.bool(true, "Mode A — Fixed SL and TP (both fixed pts)", group=grpFixed)
 useFixedSLOnly = input.bool(false, "Mode B — Fixed SL only, TP stays dynamic (burst-based)", group=grpFixed)
-fixedSLpts    = input.float(200.0, "SL Distance (pts) — used in Mode A and B", minval=1, maxval=2000, step=1, group=grpFixed)
-fixedTPpts    = input.float(200.0, "TP Distance (pts) — used in Mode A only",  minval=10, maxval=5000, step=10, group=grpFixed)
+fixedSLpts    = input.float(15.0, "SL Distance (pts) — used in Mode A and B", minval=1, maxval=2000, step=1, group=grpFixed)
+fixedTPpts    = input.float(30.0, "TP Distance (pts) — used in Mode A only",  minval=1, maxval=5000, step=1, group=grpFixed)
+
 
 grpFilt = "Filters"
 useEmaFilt  = input.bool(false, "EMA Direction Filter (3m 200)",  group=grpFilt)
@@ -40,8 +41,8 @@ useAdxFilter = input.bool(false, "📊 ADX Filter (skip choppy/ranging market)",
 adxLen       = input.int(14,    "ADX Length",                     minval=5,  maxval=30,  group=grpFilt)
 adxThresh    = input.float(20.0,"Min ADX threshold (>20 = trending)", minval=10, maxval=40, step=1, group=grpFilt)
 // ── Breakout Context Filter ──
-useBreakoutCtx  = input.bool(false, "🚀 Breakout Context (burst must break recent N-bar range)", group=grpFilt)
-breakoutCtxBars = input.int(8,     "Range lookback bars",                    minval=3, maxval=30, group=grpFilt)
+useBreakoutCtx  = input.bool(true, "🚀 Breakout Context (burst must break recent N-bar range)", group=grpFilt)
+breakoutCtxBars = input.int(5,     "Range lookback bars",                    minval=3, maxval=30, group=grpFilt)
 // ── SL Cooldown After Loss ──
 useSlCooldown   = input.bool(false, "⏸️ SL Cooldown (pause N bars after SL hit)", group=grpFilt)
 slCooldownBars  = input.int(5,     "Cooldown bars after SL hit",             minval=1, maxval=20, group=grpFilt)
@@ -50,7 +51,7 @@ slCooldownBars  = input.int(5,     "Cooldown bars after SL hit",             min
 // Filter B: Body/Range ratio  — prevents signal on wick-heavy candles with weak net direction
 useMinBody   = input.bool(true,  "🔴 Min Absolute Body (block tiny-chop signals)", group=grpFilt,
   tooltip="Body must be ≥ N pts regardless of dynamic burst threshold.\nPrevents entries when chop is tiny and threshold drops below meaningful size.\nSuggested: 200 pts for BTC 5m")
-minBodyPts   = input.float(250.0, "Min body pts (absolute)", minval=50, maxval=1000, step=10, group=grpFilt)
+minBodyPts   = input.float(50.0, "Min body pts (absolute)", minval=10, maxval=1000, step=10, group=grpFilt)
 useBodyRatio = input.bool(false,  "📐 Body/Range Ratio (block wick-heavy candles)", group=grpFilt,
   tooltip="Candle body must be ≥ X% of full high-low range.\nFilters spike candles that reverse — body looks big but wick eats it.\nSuggested: 0.60-0.70 for BTC 5m")
 minBodyRatio = input.float(0.65,  "Min body/range ratio",   minval=0.30, maxval=0.95, step=0.05, group=grpFilt)
@@ -79,6 +80,16 @@ useSlipSim    = input.bool(false, "Slippage Sim ON — show live-adjusted journa
 simSlipPts    = input.float(50.0, "Simulated Slippage (pts) — avg live entry cost", minval=1, maxval=500, step=5, group=grpSlipSim)
 maxCompMult = input.float(10,  "Max Compound Multiplier",      minval=1.0,  maxval=10.0, step=0.5,  group=grpRisk)
 
+// ── Limit Entry Simulation ────────────────────────────────────────────────────
+// Mirrors live bot: on signal, place LIMIT at HA-close. Fill only if price
+// retraces back to that level within N bars. No fill → trade skipped.
+// BUY  limit: next bar high >= limit_price → filled
+// SELL limit: next bar low  <= limit_price → filled
+// Gap-aware: if open gaps past limit, fill at open (better price).
+grpLimit      = "Limit Entry Simulation (matches live bot)"
+useLimitEntry = input.bool(true,  "Limit Entry ON — wait for retrace to HA-close", group=grpLimit)
+limitValidBars = input.int(2,     "Valid bars (cancel if no fill in N bars)",       group=grpLimit, minval=1, maxval=5)
+
 // ── Early Entry Timing ──────────────────────────────────────────────────────
 // When ON: alert fires N seconds before bar close instead of waiting for confirmation.
 // OFF (default): original behaviour — fires on barstate.isconfirmed only.
@@ -102,6 +113,7 @@ maxJRows    = input.int(10,     "Journal rows", minval=3, maxval=15, group=grpDi
 // ═══════════════════════════════════════════════════════════
 // CORE CALCULATIONS
 // ═══════════════════════════════════════════════════════════
+
 ema200  = ta.ema(close, emaLen)
 atr5    = ta.atr(5)
 atr14   = ta.atr(14)
@@ -221,6 +233,12 @@ var float[]  jMFE     = array.new_float(0)  // max favorable excursion per close
 var float compoundLots    = fixedLot
 var int   consecutiveWins = 0
 var float baseLot         = fixedLot
+
+// ── Pending limit-entry state ──────────────────────────────────────────────
+var int   pDir       = 0      // 1=BUY pending, -1=SELL pending, 0=none
+var float pLimit     = na     // HA-close limit price
+var int   pBarsLeft  = 0      // candles remaining before expiry
+var int   pSigBar    = na     // bar_index when signal fired (no fill on same bar)
 var float calcLots        = fixedLot
 var float at_cmpd_acc     = 0.0
 
@@ -313,70 +331,140 @@ if volSurgeLong or volSurgeShort
     cooldownLeft := vsCooldown
 
 // ═══════════════════════════════════════════════════════════
-// ENTER LONG
+// SIGNAL → PENDING LIMIT  (or immediate market if limit OFF)
 // ═══════════════════════════════════════════════════════════
-if volSurgeLong
-    calcLots    := useCompound ? math.round(math.min(compoundLots, baseLot * maxCompMult), 2) : fixedLot
-    deleteLines()
-    tDir        := 1
-    tEntry      := close
-    // Mode A: both fixed | Mode B: fixed SL, dynamic TP | default: fully ATR-based
-    tSLDist     := (useFixedSLTP or useFixedSLOnly) ? fixedSLpts : (usePrevCandleSL ? (close - low[1]) : vsSLDist)
-    tSL         := (useFixedSLTP or useFixedSLOnly) ? (close - fixedSLpts) : (usePrevCandleSL ? low[1] : (close - vsSLDist))
-    tTP1        := useFixedSLTP ? (close + fixedTPpts) : (close + vsSLDist * vsTP1R)
-    tTP2        := useFixedSLTP ? (close + fixedTPpts) : (close + vsSLDist * vsTP2R)
-    tTP1Hit     := false
-    tEntryT     := time        // burst bar fallback (overwritten on next bar by _needEntryT)
-    tEntryBar   := bar_index   // lock out same-bar exits
-    _needEntryT := true
-    tSess       := sessLabel()
-    ln_entry    := line.new(bar_index, tEntry, bar_index+1, tEntry, color=color.new(#2196f3,0), width=1, style=line.style_dashed)
-    ln_sl       := line.new(bar_index, tSL,    bar_index+1, tSL,    color=color.new(#f23645,0), width=1, style=line.style_dashed)
-    ln_tp1      := line.new(bar_index, tTP1,   bar_index+1, tTP1,   color=color.new(#26a69a,0), width=1, style=line.style_dashed)
-    ln_tp2      := line.new(bar_index, tTP2,   bar_index+1, tTP2,   color=color.new(#00e676,0), width=2, style=line.style_dashed)
-    label.new(bar_index, low - atr5*0.8,
-      "BUY · Vol Surge\nEntry: " + str.tostring(math.round(tEntry,1)) +
-      "  SL: " + str.tostring(math.round(tSL,1)) +
-      "  TP1(50%): " + str.tostring(math.round(tTP1,1)) +
-      "  TP2(50%): " + str.tostring(math.round(tTP2,1)),
-      color=color.new(#1a1400,5), textcolor=color.new(#ffeb3b,0),
-      style=label.style_label_up, size=size.small)
-    // ── v5: Entry alert — skipped when early_on (early block above already fired) ──
-    if not early_on
-        alert('{"signal":"BUY","secret":"VolSurge2026#Railway$BTC","sl_dist":' + str.tostring(math.round(tSLDist,1)) + ',"sl":' + str.tostring(math.round(tSL,1)) + ',"tp1":' + str.tostring(math.round(tTP1,1)) + ',"tp2":' + str.tostring(math.round(tTP2,1)) + ',"pine_entry_px":' + str.tostring(math.round(tEntry,1)) + ',"pine_time":' + str.tostring(timenow) + ',"timeframe":"' + timeframe.period + '","bar_time":' + str.tostring(time) + '}', alert.freq_once_per_bar)
+if volSurgeLong and tDir == 0 and pDir == 0
+    if useLimitEntry
+        pDir      := 1
+        pLimit    := high    // BUY: enter only if next candle BREAKS ABOVE signal high
+        pBarsLeft := limitValidBars
+        pSigBar   := bar_index
+        label.new(bar_index, low - atr5*0.6,
+          "BUY STOP @ " + str.tostring(math.round(high,1)) + " (" + str.tostring(limitValidBars) + " bars)",
+          color=color.new(#1a1400,80), textcolor=color.new(#ffeb3b,60),
+          style=label.style_label_up, size=size.tiny)
+    else
+        calcLots    := useCompound ? math.round(math.min(compoundLots, baseLot * maxCompMult), 2) : fixedLot
+        deleteLines()
+        tDir        := 1
+        tEntry      := close
+        tSLDist     := (useFixedSLTP or useFixedSLOnly) ? fixedSLpts : vsSLDist
+        tSL         := (useFixedSLTP or useFixedSLOnly) ? (close - fixedSLpts) : (close - vsSLDist)
+        tTP1        := useFixedSLTP ? (close + fixedTPpts) : (close + vsSLDist * vsTP1R)
+        tTP2        := useFixedSLTP ? (close + fixedTPpts) : (close + vsSLDist * vsTP2R)
+        tTP1Hit     := false
+        tEntryT     := time
+        tEntryBar   := bar_index
+        _needEntryT := true
+        tSess       := sessLabel()
+        ln_entry    := line.new(bar_index, tEntry, bar_index+1, tEntry, color=color.new(#2196f3,0), width=1, style=line.style_dashed)
+        ln_sl       := line.new(bar_index, tSL,    bar_index+1, tSL,    color=color.new(#f23645,0), width=1, style=line.style_dashed)
+        ln_tp1      := line.new(bar_index, tTP1,   bar_index+1, tTP1,   color=color.new(#26a69a,0), width=1, style=line.style_dashed)
+        ln_tp2      := line.new(bar_index, tTP2,   bar_index+1, tTP2,   color=color.new(#00e676,0), width=2, style=line.style_dashed)
+        label.new(bar_index, low - atr5*0.8,
+          "BUY · Vol Surge\nEntry: " + str.tostring(math.round(close,1)) + "  SL: " + str.tostring(math.round(tSL,1)) + "  TP: " + str.tostring(math.round(tTP2,1)),
+          color=color.new(#1a1400,5), textcolor=color.new(#ffeb3b,0), style=label.style_label_up, size=size.small)
+        if not early_on
+            alert('{"signal":"BUY","secret":"VolSurge2026#Railway$BTC","pine_entry_px":' + str.tostring(math.round(close,1)) + ',"pine_time":' + str.tostring(timenow) + ',"timeframe":"' + timeframe.period + '","bar_time":' + str.tostring(time) + '}', alert.freq_once_per_bar)
 
-// ═══════════════════════════════════════════════════════════
-// ENTER SHORT
-// ═══════════════════════════════════════════════════════════
-if volSurgeShort
-    calcLots    := useCompound ? math.round(math.min(compoundLots, baseLot * maxCompMult), 2) : fixedLot
-    deleteLines()
-    tDir        := -1
-    tEntry      := close
-    // Mode A: both fixed | Mode B: fixed SL, dynamic TP | default: fully ATR-based
-    tSLDist     := (useFixedSLTP or useFixedSLOnly) ? fixedSLpts : (usePrevCandleSL ? (high[1] - close) : vsSLDist)
-    tSL         := (useFixedSLTP or useFixedSLOnly) ? (close + fixedSLpts) : (usePrevCandleSL ? high[1] : (close + vsSLDist))
-    tTP1        := useFixedSLTP ? (close - fixedTPpts) : (close - vsSLDist * vsTP1R)
-    tTP2        := useFixedSLTP ? (close - fixedTPpts) : (close - vsSLDist * vsTP2R)
-    tTP1Hit     := false
-    tEntryT     := time        // burst bar fallback (overwritten on next bar by _needEntryT)
-    tEntryBar   := bar_index   // lock out same-bar exits
-    _needEntryT := true
-    tSess       := sessLabel()
-    ln_entry    := line.new(bar_index, tEntry, bar_index+1, tEntry, color=color.new(#2196f3,0), width=1, style=line.style_dashed)
-    ln_sl       := line.new(bar_index, tSL,    bar_index+1, tSL,    color=color.new(#f23645,0), width=1, style=line.style_dashed)
-    ln_tp1      := line.new(bar_index, tTP1,   bar_index+1, tTP1,   color=color.new(#26a69a,0), width=1, style=line.style_dashed)
-    ln_tp2      := line.new(bar_index, tTP2,   bar_index+1, tTP2,   color=color.new(#00e676,0), width=2, style=line.style_dashed)
-    label.new(bar_index, high + atr5*0.8,
-      "SELL · Vol Surge\nEntry: " + str.tostring(math.round(tEntry,1)) +
-      "  SL: " + str.tostring(math.round(tSL,1)) +
-      "  TP1(50%): " + str.tostring(math.round(tTP1,1)) +
-      "  TP2(50%): " + str.tostring(math.round(tTP2,1)),
-      color=color.new(#1a0800,5), textcolor=color.new(#ff6d00,0),
-      style=label.style_label_down, size=size.small)
-    // ── v5: Entry alert — skipped when early_on (early block above already fired) ──
-    if not early_on
-        alert('{"signal":"SELL","secret":"VolSurge2026#Railway$BTC","sl_dist":' + str.tostring(math.round(tSLDist,1)) + ',"sl":' + str.tostring(math.round(tSL,1)) + ',"tp1":' + str.tostring(math.round(tTP1,1)) + ',"tp2":' + str.tostring(math.round(tTP2,1)) + ',"pine_entry_px":' + str.tostring(math.round(tEntry,1)) + ',"pine_time":' + str.tostring(timenow) + ',"timeframe":"' + timeframe.period + '","bar_time":' + str.tostring(time) + '}', alert.freq_once_per_bar)
+if volSurgeShort and tDir == 0 and pDir == 0
+    if useLimitEntry
+        pDir      := -1
+        pLimit    := low     // SELL: enter only if next candle BREAKS BELOW signal low
+        pBarsLeft := limitValidBars
+        pSigBar   := bar_index
+        label.new(bar_index, high + atr5*0.6,
+          "SELL STOP @ " + str.tostring(math.round(low,1)) + " (" + str.tostring(limitValidBars) + " bars)",
+          color=color.new(#1a0800,80), textcolor=color.new(#ff6d00,60),
+          style=label.style_label_down, size=size.tiny)
+    else
+        calcLots    := useCompound ? math.round(math.min(compoundLots, baseLot * maxCompMult), 2) : fixedLot
+        deleteLines()
+        tDir        := -1
+        tEntry      := close
+        tSLDist     := (useFixedSLTP or useFixedSLOnly) ? fixedSLpts : vsSLDist
+        tSL         := (useFixedSLTP or useFixedSLOnly) ? (close + fixedSLpts) : (close + vsSLDist)
+        tTP1        := useFixedSLTP ? (close - fixedTPpts) : (close - vsSLDist * vsTP1R)
+        tTP2        := useFixedSLTP ? (close - fixedTPpts) : (close - vsSLDist * vsTP2R)
+        tTP1Hit     := false
+        tEntryT     := time
+        tEntryBar   := bar_index
+        _needEntryT := true
+        tSess       := sessLabel()
+        ln_entry    := line.new(bar_index, tEntry, bar_index+1, tEntry, color=color.new(#2196f3,0), width=1, style=line.style_dashed)
+        ln_sl       := line.new(bar_index, tSL,    bar_index+1, tSL,    color=color.new(#f23645,0), width=1, style=line.style_dashed)
+        ln_tp1      := line.new(bar_index, tTP1,   bar_index+1, tTP1,   color=color.new(#26a69a,0), width=1, style=line.style_dashed)
+        ln_tp2      := line.new(bar_index, tTP2,   bar_index+1, tTP2,   color=color.new(#00e676,0), width=2, style=line.style_dashed)
+        label.new(bar_index, high + atr5*0.8,
+          "SELL · Vol Surge\nEntry: " + str.tostring(math.round(close,1)) + "  SL: " + str.tostring(math.round(tSL,1)) + "  TP: " + str.tostring(math.round(tTP2,1)),
+          color=color.new(#1a0800,5), textcolor=color.new(#ff6d00,0), style=label.style_label_down, size=size.small)
+        if not early_on
+            alert('{"signal":"SELL","secret":"VolSurge2026#Railway$BTC","pine_entry_px":' + str.tostring(math.round(close,1)) + ',"pine_time":' + str.tostring(timenow) + ',"timeframe":"' + timeframe.period + '","bar_time":' + str.tostring(time) + '}', alert.freq_once_per_bar)
+
+// ── Limit fill check — runs every bar while pending ───────────────────────
+if pDir != 0 and tDir == 0 and bar_index > pSigBar
+    _lim_filled = false
+    _lim_px     = float(na)
+    if pDir == 1
+        // BUY STOP: fill when next candle breaks ABOVE signal high (momentum continues up)
+        if open >= pLimit
+            _lim_px := open          // gap above high → fill at open (breakout gap)
+            _lim_filled := true
+        else if high >= pLimit
+            _lim_px := pLimit        // touched/crossed high → fill at signal high
+            _lim_filled := true
+    else
+        // SELL STOP: fill when next candle breaks BELOW signal low (momentum continues down)
+        if open <= pLimit
+            _lim_px := open          // gap below low → fill at open
+            _lim_filled := true
+        else if low <= pLimit
+            _lim_px := pLimit        // touched/crossed low → fill at signal low
+            _lim_filled := true
+
+    if _lim_filled
+        calcLots    := useCompound ? math.round(math.min(compoundLots, baseLot * maxCompMult), 2) : fixedLot
+        deleteLines()
+        tDir        := pDir
+        tEntry      := _lim_px
+        tSLDist     := (useFixedSLTP or useFixedSLOnly) ? fixedSLpts : vsSLDist
+        tSL         := pDir == 1
+                         ? ((useFixedSLTP or useFixedSLOnly) ? (_lim_px - fixedSLpts) : (_lim_px - vsSLDist))
+                         : ((useFixedSLTP or useFixedSLOnly) ? (_lim_px + fixedSLpts) : (_lim_px + vsSLDist))
+        tTP1        := pDir == 1
+                         ? (useFixedSLTP ? (_lim_px + fixedTPpts) : (_lim_px + vsSLDist * vsTP1R))
+                         : (useFixedSLTP ? (_lim_px - fixedTPpts) : (_lim_px - vsSLDist * vsTP1R))
+        tTP2        := pDir == 1
+                         ? (useFixedSLTP ? (_lim_px + fixedTPpts) : (_lim_px + vsSLDist * vsTP2R))
+                         : (useFixedSLTP ? (_lim_px - fixedTPpts) : (_lim_px - vsSLDist * vsTP2R))
+        tTP1Hit     := false
+        tEntryT     := time          // fill bar time — no deferral needed for limit fills
+        tEntryBar   := bar_index
+        _needEntryT := false         // don't defer — limit fill time is THIS bar, not next
+        tSess       := sessLabel()
+        ln_entry    := line.new(bar_index, tEntry, bar_index+1, tEntry, color=color.new(#2196f3,0), width=1, style=line.style_dashed)
+        ln_sl       := line.new(bar_index, tSL,    bar_index+1, tSL,    color=color.new(#f23645,0), width=1, style=line.style_dashed)
+        ln_tp1      := line.new(bar_index, tTP1,   bar_index+1, tTP1,   color=color.new(#26a69a,0), width=1, style=line.style_dashed)
+        ln_tp2      := line.new(bar_index, tTP2,   bar_index+1, tTP2,   color=color.new(#00e676,0), width=2, style=line.style_dashed)
+        if pDir == 1
+            label.new(bar_index, low - atr5*0.8,
+              "BUY FILLED [LIMIT]\nFill: " + str.tostring(math.round(_lim_px,1)) + "  SL: " + str.tostring(math.round(tSL,1)) + "  TP: " + str.tostring(math.round(tTP2,1)),
+              color=color.new(#1a1400,5), textcolor=color.new(#ffeb3b,0), style=label.style_label_up, size=size.small)
+        else
+            label.new(bar_index, high + atr5*0.8,
+              "SELL FILLED [LIMIT]\nFill: " + str.tostring(math.round(_lim_px,1)) + "  SL: " + str.tostring(math.round(tSL,1)) + "  TP: " + str.tostring(math.round(tTP2,1)),
+              color=color.new(#1a0800,5), textcolor=color.new(#ff6d00,0), style=label.style_label_down, size=size.small)
+        pDir      := 0
+        pBarsLeft := 0
+        pSigBar   := na
+    else
+        pBarsLeft -= 1
+        if pBarsLeft <= 0
+            label.new(bar_index, close, "LIMIT EXPIRED",
+              color=color.new(color.gray,80), textcolor=color.gray,
+              style=label.style_label_left, size=size.tiny)
+            pDir    := 0
+            pSigBar := na
 
 // ═══════════════════════════════════════════════════════════
 // MANAGE LONG
@@ -420,7 +508,7 @@ if tDir == 1
         at_cmpd_acc     += _cmpd_pnl
         consecutiveWins += 1
         compoundLots    := math.min(baseLot * (consecutiveWins + 1), baseLot * maxCompMult)
-        _rpnl     = pushJournal(1, tEntryT, time, tEntry, tTP2, _pts, _statStr, tSess, calcLots, _cmpd_pnl, tSL, float(na))  // TP win: true MFE unknowable after exit
+        _rpnl     = pushJournal(1, tEntryT, time_close, tEntry, tTP2, _pts, _statStr, tSess, calcLots, _cmpd_pnl, tSL, float(na))  // TP win: true MFE unknowable after exit
         statTrades += 1
         statWins   += 1
         if (_pts - simSlipPts) > 0
@@ -444,7 +532,7 @@ if tDir == 1
         at_cmpd_acc     += _cmpd_pnl
         consecutiveWins := 0
         compoundLots    := baseLot
-        _rpnl     = pushJournal(1, tEntryT, time, tEntry, tSL, _pts, _statStr, tSess, calcLots, _cmpd_pnl, tSL, nz(tMaxFav, 0.0))
+        _rpnl     = pushJournal(1, tEntryT, time_close, tEntry, tSL, _pts, _statStr, tSess, calcLots, _cmpd_pnl, tSL, nz(tMaxFav, 0.0))
         statTrades += 1
         statPts    += _pts
         statPnl    += _rpnl
@@ -498,7 +586,7 @@ if tDir == -1
         at_cmpd_acc     += _cmpd_pnl
         consecutiveWins += 1
         compoundLots    := math.min(baseLot * (consecutiveWins + 1), baseLot * maxCompMult)
-        _rpnl     = pushJournal(-1, tEntryT, time, tEntry, tTP2, _pts, _statStr, tSess, calcLots, _cmpd_pnl, tSL, float(na))  // TP win: true MFE unknowable after exit
+        _rpnl     = pushJournal(-1, tEntryT, time_close, tEntry, tTP2, _pts, _statStr, tSess, calcLots, _cmpd_pnl, tSL, float(na))  // TP win: true MFE unknowable after exit
         statTrades += 1
         statWins   += 1
         if (_pts - simSlipPts) > 0
@@ -522,7 +610,7 @@ if tDir == -1
         at_cmpd_acc     += _cmpd_pnl
         consecutiveWins := 0
         compoundLots    := baseLot
-        _rpnl     = pushJournal(-1, tEntryT, time, tEntry, tSL, _pts, _statStr, tSess, calcLots, _cmpd_pnl, tSL, nz(tMaxFav, 0.0))
+        _rpnl     = pushJournal(-1, tEntryT, time_close, tEntry, tSL, _pts, _statStr, tSess, calcLots, _cmpd_pnl, tSL, nz(tMaxFav, 0.0))
         statTrades += 1
         statPts    += _pts
         statPnl    += _rpnl
@@ -588,9 +676,9 @@ if barstate.islast and showTable
 
 // ═══════════════════════════════════════════════════════════
 // JOURNAL TABLE  (bottom-right)
-// Columns: Dir | Date | In | Out | Entry$ | Exit$ | Pts | Lots | Cmpd P&L | Fix P&L | Status/Sess
+// Columns: Dir | Date | In | Out | Dur | Entry$ | Exit$ | SL$ | Pts | Lots | Cmpd P&L | Fix P&L | Status/Sess | MFE pts
 // ═══════════════════════════════════════════════════════════
-var table jTbl = table.new(position.bottom_right, 13, 16,
+var table jTbl = table.new(position.bottom_right, 14, 16,
   bgcolor=color.new(#0d0d0d,5), border_color=color.new(#333333,0), border_width=1,
   frame_color=color.new(#555555,0), frame_width=1)
 
@@ -599,6 +687,10 @@ fmtT(t) =>
 
 fmtPx(px) =>
     str.tostring(math.round(px, 1))
+
+fmtDur(inT, outT) =>
+    _secs = math.round((outT - inT) / 1000)
+    _secs <= 0 ? "1m" : _secs < 60 ? str.tostring(_secs) + "s" : _secs < 3600 ? str.tostring(math.floor(_secs / 60)) + "m" : str.tostring(math.floor(_secs / 3600)) + "h " + str.tostring(math.floor((_secs % 3600) / 60)) + "m"
 
 if barstate.islast and showJournal
     _hbg = useSlipSim ? color.new(#1a0a00,0) : color.new(#1a1400,0)
@@ -610,15 +702,16 @@ if barstate.islast and showJournal
     table.cell(jTbl, 1,  0, "Date",          text_color=_hfg, text_size=size.small, bgcolor=_hbg)
     table.cell(jTbl, 2,  0, "In",            text_color=_hfg, text_size=size.small, bgcolor=_hbg)
     table.cell(jTbl, 3,  0, "Out",           text_color=_hfg, text_size=size.small, bgcolor=_hbg)
-    table.cell(jTbl, 4,  0, _entHdr,         text_color=_hfg, text_size=size.small, bgcolor=_hbg)
-    table.cell(jTbl, 5,  0, "Exit $",        text_color=_hfg, text_size=size.small, bgcolor=_hbg)
-    table.cell(jTbl, 6,  0, "SL $",          text_color=color.new(#ff4444,0), text_size=size.small, bgcolor=_hbg)
-    table.cell(jTbl, 7,  0, _ptsHdr,         text_color=_hfg, text_size=size.small, bgcolor=_hbg)
-    table.cell(jTbl, 8,  0, "Lots",          text_color=_hfg, text_size=size.small, bgcolor=_hbg)
-    table.cell(jTbl, 9,  0, "Cmpd P&L",      text_color=_hfg, text_size=size.small, bgcolor=_hbg)
-    table.cell(jTbl, 10, 0, _pnlHdr,         text_color=_hfg, text_size=size.small, bgcolor=_hbg)
-    table.cell(jTbl, 11, 0, "Status / Sess", text_color=_hfg, text_size=size.small, bgcolor=_hbg)
-    table.cell(jTbl, 12, 0, "MFE pts",       text_color=color.new(#ff9800,0), text_size=size.small, bgcolor=_hbg)
+    table.cell(jTbl, 4,  0, "Dur",           text_color=color.new(#90caf9,0), text_size=size.small, bgcolor=_hbg)
+    table.cell(jTbl, 5,  0, _entHdr,         text_color=_hfg, text_size=size.small, bgcolor=_hbg)
+    table.cell(jTbl, 6,  0, "Exit $",        text_color=_hfg, text_size=size.small, bgcolor=_hbg)
+    table.cell(jTbl, 7,  0, "SL $",          text_color=color.new(#ff4444,0), text_size=size.small, bgcolor=_hbg)
+    table.cell(jTbl, 8,  0, _ptsHdr,         text_color=_hfg, text_size=size.small, bgcolor=_hbg)
+    table.cell(jTbl, 9,  0, "Lots",          text_color=_hfg, text_size=size.small, bgcolor=_hbg)
+    table.cell(jTbl, 10, 0, "Cmpd P&L",      text_color=_hfg, text_size=size.small, bgcolor=_hbg)
+    table.cell(jTbl, 11, 0, _pnlHdr,         text_color=_hfg, text_size=size.small, bgcolor=_hbg)
+    table.cell(jTbl, 12, 0, "Status / Sess", text_color=_hfg, text_size=size.small, bgcolor=_hbg)
+    table.cell(jTbl, 13, 0, "MFE pts",       text_color=color.new(#ff9800,0), text_size=size.small, bgcolor=_hbg)
 
     _n = array.size(jDir)
     for r = 0 to maxJRows - 1
@@ -645,6 +738,9 @@ if barstate.islast and showJournal
             _disp_pts  = useSlipSim ? (_is_win ? _pts - simSlipPts : _pts) : _pts
             _disp_pnl  = useSlipSim ? math.round(_disp_pts * fixedLot, 2) : _pnl
             _disp_sl   = useSlipSim ? (na(_sl) ? na : (_d == 1 ? _sl + simSlipPts : _sl - simSlipPts)) : _sl
+            // Exit: WIN → TP price target unchanged (entry shift already cuts pts).
+            //       LOSS → exit = SL, which shifts with fill by slip (matches _disp_sl).
+            _disp_ext  = useSlipSim ? (_is_win ? _ext : (_d == 1 ? _ext + simSlipPts : _ext - simSlipPts)) : _ext
             _win  = useSlipSim ? _disp_pts > 0 : (_st == "TP1 + TP2" or _st == "TP2 ✓")
             _bg   = _win ? color.new(#0a1f0a,0) : color.new(#1f0a0a,0)
             _pc   = _win ? color.new(#26a69a,0) : color.new(#f23645,0)
@@ -655,17 +751,18 @@ if barstate.islast and showJournal
             table.cell(jTbl, 1,  _row, _dateStr,                                                           text_color=color.silver,          text_size=size.small, bgcolor=_bg)
             table.cell(jTbl, 2,  _row, fmtT(_inT),                                                        text_color=color.silver,          text_size=size.small, bgcolor=_bg)
             table.cell(jTbl, 3,  _row, fmtT(_outT),                                                       text_color=color.silver,          text_size=size.small, bgcolor=_bg)
-            table.cell(jTbl, 4,  _row, fmtPx(_disp_ent),                                                  text_color=_entCol,               text_size=size.small, bgcolor=_bg)
-            table.cell(jTbl, 5,  _row, fmtPx(_ext),                                                       text_color=_pc,                   text_size=size.small, bgcolor=_bg)
-            table.cell(jTbl, 6,  _row, na(_disp_sl) ? "—" : str.tostring(math.round(_disp_sl,1)),         text_color=color.new(#ff4444,0),  text_size=size.small, bgcolor=_bg)
-            table.cell(jTbl, 7,  _row, (_disp_pts >= 0 ? "+" : "") + str.tostring(_disp_pts),             text_color=_pc,                   text_size=size.small, bgcolor=_bg)
-            table.cell(jTbl, 8,  _row, str.tostring(_lots),                                                text_color=color.new(#d1d5db,0),  text_size=size.small, bgcolor=_bg)
-            table.cell(jTbl, 9,  _row, (_cpnl >= 0 ? "+$" : "-$") + str.tostring(math.abs(_cpnl)),        text_color=_pc,                   text_size=size.small, bgcolor=_bg)
-            table.cell(jTbl, 10, _row, (_disp_pnl >= 0 ? "+$" : "-$") + str.tostring(math.abs(_disp_pnl)),text_color=_pc,                   text_size=size.small, bgcolor=_bg)
-            table.cell(jTbl, 11, _row, _st + " · " + _se,                                                 text_color=_pc,                   text_size=size.small, bgcolor=_bg)
-            table.cell(jTbl, 12, _row, na(_mfe) ? "≥TP ✓" : "+" + str.tostring(math.round(_mfe, 0)),       text_color=na(_mfe) ? color.new(#26a69a,0) : color.new(#ff9800,0), text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 4,  _row, fmtDur(_inT, _outT),                                                 text_color=color.new(#90caf9,0),  text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 5,  _row, fmtPx(_disp_ent),                                                  text_color=_entCol,               text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 6,  _row, fmtPx(_disp_ext),                                                  text_color=_pc,                   text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 7,  _row, na(_disp_sl) ? "—" : str.tostring(math.round(_disp_sl,1)),         text_color=color.new(#ff4444,0),  text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 8,  _row, (_disp_pts >= 0 ? "+" : "") + str.tostring(_disp_pts),             text_color=_pc,                   text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 9,  _row, str.tostring(_lots),                                                text_color=color.new(#d1d5db,0),  text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 10, _row, (_cpnl >= 0 ? "+$" : "-$") + str.tostring(math.abs(_cpnl)),        text_color=_pc,                   text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 11, _row, (_disp_pnl >= 0 ? "+$" : "-$") + str.tostring(math.abs(_disp_pnl)),text_color=_pc,                   text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 12, _row, _st + " · " + _se,                                                 text_color=_pc,                   text_size=size.small, bgcolor=_bg)
+            table.cell(jTbl, 13, _row, na(_mfe) ? "≥TP ✓" : "+" + str.tostring(math.round(_mfe, 0)),       text_color=na(_mfe) ? color.new(#26a69a,0) : color.new(#ff9800,0), text_size=size.small, bgcolor=_bg)
         else
-            for c = 0 to 12
+            for c = 0 to 13
                 table.cell(jTbl, c, _row, "", text_size=size.small, bgcolor=color.new(#111111,0))
 
     _liveRow = maxJRows + 1
@@ -680,18 +777,19 @@ if barstate.islast and showJournal
         table.cell(jTbl, 1,  _liveRow, "LIVE",                                                          text_color=color.yellow,          text_size=size.small, bgcolor=_lbg)
         table.cell(jTbl, 2,  _liveRow, fmtT(tEntryT),                                                  text_color=color.silver,          text_size=size.small, bgcolor=_lbg)
         table.cell(jTbl, 3,  _liveRow, "—",                                                             text_color=color.gray,            text_size=size.small, bgcolor=_lbg)
-        table.cell(jTbl, 4,  _liveRow, fmtPx(tEntry),                                                  text_color=color.new(#90caf9,0),  text_size=size.small, bgcolor=_lbg)
-        table.cell(jTbl, 5,  _liveRow, fmtPx(close),                                                   text_color=_lCol,                 text_size=size.small, bgcolor=_lbg)
-        table.cell(jTbl, 6,  _liveRow, str.tostring(math.round(tSL,1)),                                 text_color=color.new(#ff4444,0),  text_size=size.small, bgcolor=_lbg)
-        table.cell(jTbl, 7,  _liveRow, (_lPts >= 0 ? "+" : "") + str.tostring(_lPts),                  text_color=_lCol,                 text_size=size.small, bgcolor=_lbg)
-        table.cell(jTbl, 8,  _liveRow, str.tostring(calcLots),                                          text_color=color.new(#d1d5db,0),  text_size=size.small, bgcolor=_lbg)
-        table.cell(jTbl, 9,  _liveRow, (_lCpnl >= 0 ? "+$" : "-$") + str.tostring(math.abs(_lCpnl)),  text_color=_lCol,                 text_size=size.small, bgcolor=_lbg)
-        table.cell(jTbl, 10, _liveRow, (_lPnl  >= 0 ? "+$" : "-$") + str.tostring(math.abs(_lPnl)),   text_color=_lCol,                 text_size=size.small, bgcolor=_lbg)
-        table.cell(jTbl, 11, _liveRow, tTP1Hit ? "TP1 Hit · 50% Booked" : "Open",                      text_color=color.yellow,          text_size=size.small, bgcolor=_lbg)
+        table.cell(jTbl, 4,  _liveRow, fmtDur(tEntryT, time),                                            text_color=color.new(#90caf9,0),  text_size=size.small, bgcolor=_lbg)
+        table.cell(jTbl, 5,  _liveRow, fmtPx(tEntry),                                                  text_color=color.new(#90caf9,0),  text_size=size.small, bgcolor=_lbg)
+        table.cell(jTbl, 6,  _liveRow, fmtPx(close),                                                   text_color=_lCol,                 text_size=size.small, bgcolor=_lbg)
+        table.cell(jTbl, 7,  _liveRow, str.tostring(math.round(tSL,1)),                                 text_color=color.new(#ff4444,0),  text_size=size.small, bgcolor=_lbg)
+        table.cell(jTbl, 8,  _liveRow, (_lPts >= 0 ? "+" : "") + str.tostring(_lPts),                  text_color=_lCol,                 text_size=size.small, bgcolor=_lbg)
+        table.cell(jTbl, 9,  _liveRow, str.tostring(calcLots),                                          text_color=color.new(#d1d5db,0),  text_size=size.small, bgcolor=_lbg)
+        table.cell(jTbl, 10, _liveRow, (_lCpnl >= 0 ? "+$" : "-$") + str.tostring(math.abs(_lCpnl)),  text_color=_lCol,                 text_size=size.small, bgcolor=_lbg)
+        table.cell(jTbl, 11, _liveRow, (_lPnl  >= 0 ? "+$" : "-$") + str.tostring(math.abs(_lPnl)),   text_color=_lCol,                 text_size=size.small, bgcolor=_lbg)
+        table.cell(jTbl, 12, _liveRow, tTP1Hit ? "TP1 Hit · 50% Booked" : "Open",                      text_color=color.yellow,          text_size=size.small, bgcolor=_lbg)
         _lMFE = tDir == 1 ? math.max(0.0, high - tEntry) : math.max(0.0, tEntry - low)
-        table.cell(jTbl, 12, _liveRow, "+" + str.tostring(math.round(_lMFE, 0)),                        text_color=color.new(#ff9800,0),  text_size=size.small, bgcolor=_lbg)
+        table.cell(jTbl, 13, _liveRow, "+" + str.tostring(math.round(_lMFE, 0)),                        text_color=color.new(#ff9800,0),  text_size=size.small, bgcolor=_lbg)
     else
-        for c = 0 to 12
+        for c = 0 to 13
             table.cell(jTbl, c, _liveRow, "", bgcolor=color.new(#111111,0))
 
     // ── Journal summary: totals of VISIBLE rows only ──────────────
@@ -730,12 +828,13 @@ if barstate.islast and showJournal
     table.cell(jTbl, 3,  _statsRow, "", text_color=color.gray, text_size=size.small, bgcolor=_sbg)
     table.cell(jTbl, 4,  _statsRow, "", text_color=color.gray, text_size=size.small, bgcolor=_sbg)
     table.cell(jTbl, 5,  _statsRow, "", text_color=color.gray, text_size=size.small, bgcolor=_sbg)
-    table.cell(jTbl, 6,  _statsRow, "",           text_color=color.gray,  text_size=size.small, bgcolor=_sbg)
-    table.cell(jTbl, 7,  _statsRow, _visPtsStr,  text_color=_visPtsCol,  text_size=size.small, bgcolor=_sbg)
-    table.cell(jTbl, 8,  _statsRow, "",           text_color=color.gray,  text_size=size.small, bgcolor=_sbg)
-    table.cell(jTbl, 9,  _statsRow, _visCPnlStr, text_color=_visCPnlCol, text_size=size.small, bgcolor=_sbg)
-    table.cell(jTbl, 10, _statsRow, _visPnlStr,  text_color=_visPnlCol,  text_size=size.small, bgcolor=_sbg)
-    table.cell(jTbl, 11, _statsRow, "",           text_color=color.gray,  text_size=size.small, bgcolor=_sbg)
+    table.cell(jTbl, 6,  _statsRow, "", text_color=color.gray, text_size=size.small, bgcolor=_sbg)
+    table.cell(jTbl, 7,  _statsRow, "",           text_color=color.gray,  text_size=size.small, bgcolor=_sbg)
+    table.cell(jTbl, 8,  _statsRow, _visPtsStr,  text_color=_visPtsCol,  text_size=size.small, bgcolor=_sbg)
+    table.cell(jTbl, 9,  _statsRow, "",           text_color=color.gray,  text_size=size.small, bgcolor=_sbg)
+    table.cell(jTbl, 10, _statsRow, _visCPnlStr, text_color=_visCPnlCol, text_size=size.small, bgcolor=_sbg)
+    table.cell(jTbl, 11, _statsRow, _visPnlStr,  text_color=_visPnlCol,  text_size=size.small, bgcolor=_sbg)
+    table.cell(jTbl, 12, _statsRow, "",           text_color=color.gray,  text_size=size.small, bgcolor=_sbg)
     // ── MFE stats: min and avg across visible rows ──
     _mfe_min = float(na)
     _mfe_sum = 0.0
@@ -749,7 +848,7 @@ if barstate.islast and showJournal
                 _mfe_min := na(_mfe_min) ? _mv : math.min(_mfe_min, _mv)
     _mfe_avg = _mfe_cnt > 0 ? _mfe_sum / _mfe_cnt : float(na)
     _mfe_cell = (na(_mfe_min) ? "—" : "↓" + str.tostring(math.round(_mfe_min, 0))) + (na(_mfe_avg) ? "" : " ⌀" + str.tostring(math.round(_mfe_avg, 0)))
-    table.cell(jTbl, 12, _statsRow, _mfe_cell,   text_color=color.new(#ff9800,0), text_size=size.small, bgcolor=_sbg)
+    table.cell(jTbl, 13, _statsRow, _mfe_cell,   text_color=color.new(#ff9800,0), text_size=size.small, bgcolor=_sbg)
 
 // ═══════════════════════════════════════════════════════════
 // ALL-TIME STATS TABLE  (bottom-left)
@@ -835,4 +934,5 @@ if barstate.islast and showJournal
 alertcondition(volSurgeLong,  "Vol Surge BUY",  '{"signal":"BUY","secret":"VolSurge2026#Railway$BTC"}')
 alertcondition(volSurgeShort, "Vol Surge SELL", '{"signal":"SELL","secret":"VolSurge2026#Railway$BTC"}')
 alertcondition(volSurgeLong or volSurgeShort, "Vol Surge ANY", '{"signal":"ANY","secret":"VolSurge2026#Railway$BTC"}')
+
 
