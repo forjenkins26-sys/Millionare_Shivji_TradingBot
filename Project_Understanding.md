@@ -187,4 +187,4 @@ flyctl ssh console -C "curl ifconfig.me" --app millionare-shivji-tradingbot
 - Updated `Project_Understanding.md` — corrected from 5min to 1min, corrected SL/TP from ATR-based to fixed 15/30, added full config, added changelog
 - **No code changes made to Mummy bot in this session**
 
-<!-- deploy-test: 04-Jun-2026 12:41 IST -->
+<!-- deploy-test: 04-Jun-2026 14:00 IST -->
