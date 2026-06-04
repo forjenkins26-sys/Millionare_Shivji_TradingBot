@@ -534,7 +534,10 @@ def watch_breakout_entry(
         f"Waiting up to {int(timeout_s)}s for breakout..."
     )
     while time.time() < deadline:
-        time.sleep(0.5)
+        # Wake on WS mark_price tick (~200ms) instead of blind 0.5s sleep
+        # Reduces breakout detection lag from ~500ms to ~200ms
+        feed.mark_price_event.wait(timeout=0.1)
+        feed.mark_price_event.clear()
         cur = feed.mark_price
         if cur is None:
             continue
