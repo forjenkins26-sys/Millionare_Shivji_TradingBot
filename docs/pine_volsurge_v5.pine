@@ -498,33 +498,8 @@ if tDir == 1
         // ── Notify bot: close 50% at TP1, keep remaining 50% with original SL ──
         alert('{"signal":"TP1_HIT","secret":"VolSurge2026#Railway$BTC","direction":"BUY","tp1_price":' + str.tostring(math.round(tTP1,1)) + ',"sl":' + str.tostring(math.round(tSL,1)) + ',"pine_time":' + str.tostring(timenow) + ',"timeframe":"' + timeframe.period + '","bar_time":' + str.tostring(time) + '}', alert.freq_once_per_bar)
 
-    // ── TP2: remaining 50% exits ──
-    // _exitOK guard removed — TP can fire on fill bar (matches bot position monitor behavior)
-    if high >= tTP2
-        // Blended PnL: 50% booked at TP1 + 50% exiting at TP2
-        _blended  = tTP1Hit ? 0.5 * (tTP1 - tEntry) + 0.5 * (tTP2 - tEntry) : (tTP2 - tEntry)
-        _pts      = math.round(_blended, 1)
-        _statStr  = tTP1Hit ? "TP1 + TP2" : "TP2 ✓"
-        _cmpd_pnl = math.round(_pts * calcLots, 2)
-        at_cmpd_acc     += _cmpd_pnl
-        consecutiveWins += 1
-        compoundLots    := math.min(baseLot * (consecutiveWins + 1), baseLot * maxCompMult)
-        _rpnl     = pushJournal(1, tEntryT, time_close, tEntry, tTP2, _pts, _statStr, tSess, calcLots, _cmpd_pnl, tSL, float(na))  // TP win: true MFE unknowable after exit
-        statTrades += 1
-        statWins   += 1
-        if (_pts - simSlipPts) > 0
-            statSimWins += 1
-        statPts    += _pts
-        statPnl    += _rpnl
-        balance    += _rpnl
-        label.new(bar_index, tTP2, _statStr + "  +" + str.tostring(_pts) + "pts", color=color.new(#00e676,10), textcolor=color.black, style=label.style_label_left, size=size.small)
-        alert('{"signal":"TP2_HIT","secret":"VolSurge2026#Railway$BTC","direction":"BUY","tp2_price":' + str.tostring(math.round(tTP2,1)) + ',"pine_time":' + str.tostring(timenow) + ',"timeframe":"' + timeframe.period + '","bar_time":' + str.tostring(time) + '}', alert.freq_once_per_bar)
-        deleteLines()
-        tDir    := 0
-        tMaxFav := na
-
-    // ── SL: fire even on fill bar — matches bot behavior
-    else if low <= tSL
+    // ── SL checked FIRST — SL is closer to fill than TP → fires first on bracket order
+    if low <= tSL
         // Blended PnL: if TP1 was hit → 50% at TP1 + 50% at SL; else full loss
         _blended  = tTP1Hit ? 0.5 * (tTP1 - tEntry) + 0.5 * (tSL - tEntry) : (tSL - tEntry)
         _pts      = math.round(_blended, 1)
@@ -541,6 +516,30 @@ if tDir == 1
         label.new(bar_index, tSL, _statStr + "  " + (_pts >= 0 ? "+" : "") + str.tostring(_pts) + "pts", color=color.new(#f23645,10), textcolor=color.white, style=label.style_label_left, size=size.small)
         if useSlCooldown
             slCooldownLeft := slCooldownBars
+        deleteLines()
+        tDir    := 0
+        tMaxFav := na
+
+    // ── TP2: only if SL not hit ──
+    else if high >= tTP2
+        // Blended PnL: 50% booked at TP1 + 50% exiting at TP2
+        _blended  = tTP1Hit ? 0.5 * (tTP1 - tEntry) + 0.5 * (tTP2 - tEntry) : (tTP2 - tEntry)
+        _pts      = math.round(_blended, 1)
+        _statStr  = tTP1Hit ? "TP1 + TP2" : "TP2 ✓"
+        _cmpd_pnl = math.round(_pts * calcLots, 2)
+        at_cmpd_acc     += _cmpd_pnl
+        consecutiveWins += 1
+        compoundLots    := math.min(baseLot * (consecutiveWins + 1), baseLot * maxCompMult)
+        _rpnl     = pushJournal(1, tEntryT, time_close, tEntry, tTP2, _pts, _statStr, tSess, calcLots, _cmpd_pnl, tSL, float(na))
+        statTrades += 1
+        statWins   += 1
+        if (_pts - simSlipPts) > 0
+            statSimWins += 1
+        statPts    += _pts
+        statPnl    += _rpnl
+        balance    += _rpnl
+        label.new(bar_index, tTP2, _statStr + "  +" + str.tostring(_pts) + "pts", color=color.new(#00e676,10), textcolor=color.black, style=label.style_label_left, size=size.small)
+        alert('{"signal":"TP2_HIT","secret":"VolSurge2026#Railway$BTC","direction":"BUY","tp2_price":' + str.tostring(math.round(tTP2,1)) + ',"pine_time":' + str.tostring(timenow) + ',"timeframe":"' + timeframe.period + '","bar_time":' + str.tostring(time) + '}', alert.freq_once_per_bar)
         deleteLines()
         tDir    := 0
         tMaxFav := na
@@ -577,33 +576,8 @@ if tDir == -1
         // ── Notify bot: close 50% at TP1, keep remaining 50% with original SL ──
         alert('{"signal":"TP1_HIT","secret":"VolSurge2026#Railway$BTC","direction":"SELL","tp1_price":' + str.tostring(math.round(tTP1,1)) + ',"sl":' + str.tostring(math.round(tSL,1)) + ',"pine_time":' + str.tostring(timenow) + ',"timeframe":"' + timeframe.period + '","bar_time":' + str.tostring(time) + '}', alert.freq_once_per_bar)
 
-    // ── TP2: remaining 50% exits ──
-    // _exitOK guard removed — TP can fire on fill bar (matches bot position monitor behavior)
-    if low <= tTP2
-        // Blended PnL: 50% booked at TP1 + 50% exiting at TP2
-        _blended  = tTP1Hit ? 0.5 * (tEntry - tTP1) + 0.5 * (tEntry - tTP2) : (tEntry - tTP2)
-        _pts      = math.round(_blended, 1)
-        _statStr  = tTP1Hit ? "TP1 + TP2" : "TP2 ✓"
-        _cmpd_pnl = math.round(_pts * calcLots, 2)
-        at_cmpd_acc     += _cmpd_pnl
-        consecutiveWins += 1
-        compoundLots    := math.min(baseLot * (consecutiveWins + 1), baseLot * maxCompMult)
-        _rpnl     = pushJournal(-1, tEntryT, time_close, tEntry, tTP2, _pts, _statStr, tSess, calcLots, _cmpd_pnl, tSL, float(na))  // TP win: true MFE unknowable after exit
-        statTrades += 1
-        statWins   += 1
-        if (_pts - simSlipPts) > 0
-            statSimWins += 1
-        statPts    += _pts
-        statPnl    += _rpnl
-        balance    += _rpnl
-        label.new(bar_index, tTP2, _statStr + "  +" + str.tostring(_pts) + "pts", color=color.new(#00e676,10), textcolor=color.black, style=label.style_label_left, size=size.small)
-        alert('{"signal":"TP2_HIT","secret":"VolSurge2026#Railway$BTC","direction":"SELL","tp2_price":' + str.tostring(math.round(tTP2,1)) + ',"pine_time":' + str.tostring(timenow) + ',"timeframe":"' + timeframe.period + '","bar_time":' + str.tostring(time) + '}', alert.freq_once_per_bar)
-        deleteLines()
-        tDir    := 0
-        tMaxFav := na
-
-    // ── SL: fire even on fill bar — matches bot behavior
-    else if high >= tSL
+    // ── SL checked FIRST — SL is closer to fill than TP → fires first on bracket order
+    if high >= tSL
         // Blended PnL: if TP1 was hit → 50% at TP1 + 50% at SL; else full loss
         _blended  = tTP1Hit ? 0.5 * (tEntry - tTP1) + 0.5 * (tEntry - tSL) : (tEntry - tSL)
         _pts      = math.round(_blended, 1)
@@ -620,6 +594,30 @@ if tDir == -1
         label.new(bar_index, tSL, _statStr + "  " + (_pts >= 0 ? "+" : "") + str.tostring(_pts) + "pts", color=color.new(#f23645,10), textcolor=color.white, style=label.style_label_left, size=size.small)
         if useSlCooldown
             slCooldownLeft := slCooldownBars
+        deleteLines()
+        tDir    := 0
+        tMaxFav := na
+
+    // ── TP2: only if SL not hit ──
+    else if low <= tTP2
+        // Blended PnL: 50% booked at TP1 + 50% exiting at TP2
+        _blended  = tTP1Hit ? 0.5 * (tEntry - tTP1) + 0.5 * (tEntry - tTP2) : (tEntry - tTP2)
+        _pts      = math.round(_blended, 1)
+        _statStr  = tTP1Hit ? "TP1 + TP2" : "TP2 ✓"
+        _cmpd_pnl = math.round(_pts * calcLots, 2)
+        at_cmpd_acc     += _cmpd_pnl
+        consecutiveWins += 1
+        compoundLots    := math.min(baseLot * (consecutiveWins + 1), baseLot * maxCompMult)
+        _rpnl     = pushJournal(-1, tEntryT, time_close, tEntry, tTP2, _pts, _statStr, tSess, calcLots, _cmpd_pnl, tSL, float(na))
+        statTrades += 1
+        statWins   += 1
+        if (_pts - simSlipPts) > 0
+            statSimWins += 1
+        statPts    += _pts
+        statPnl    += _rpnl
+        balance    += _rpnl
+        label.new(bar_index, tTP2, _statStr + "  +" + str.tostring(_pts) + "pts", color=color.new(#00e676,10), textcolor=color.black, style=label.style_label_left, size=size.small)
+        alert('{"signal":"TP2_HIT","secret":"VolSurge2026#Railway$BTC","direction":"SELL","tp2_price":' + str.tostring(math.round(tTP2,1)) + ',"pine_time":' + str.tostring(timenow) + ',"timeframe":"' + timeframe.period + '","bar_time":' + str.tostring(time) + '}', alert.freq_once_per_bar)
         deleteLines()
         tDir    := 0
         tMaxFav := na
