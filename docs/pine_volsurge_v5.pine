@@ -499,8 +499,7 @@ if tDir == 1
         alert('{"signal":"TP1_HIT","secret":"VolSurge2026#Railway$BTC","direction":"BUY","tp1_price":' + str.tostring(math.round(tTP1,1)) + ',"sl":' + str.tostring(math.round(tSL,1)) + ',"pine_time":' + str.tostring(timenow) + ',"timeframe":"' + timeframe.period + '","bar_time":' + str.tostring(time) + '}', alert.freq_once_per_bar)
 
     // ── TP2: remaining 50% exits ──
-    // _exitOK guard removed — TP can fire on fill bar (matches bot position monitor behavior)
-    if high >= tTP2
+    if _exitOK and high >= tTP2
         // Blended PnL: 50% booked at TP1 + 50% exiting at TP2
         _blended  = tTP1Hit ? 0.5 * (tTP1 - tEntry) + 0.5 * (tTP2 - tEntry) : (tTP2 - tEntry)
         _pts      = math.round(_blended, 1)
@@ -578,8 +577,7 @@ if tDir == -1
         alert('{"signal":"TP1_HIT","secret":"VolSurge2026#Railway$BTC","direction":"SELL","tp1_price":' + str.tostring(math.round(tTP1,1)) + ',"sl":' + str.tostring(math.round(tSL,1)) + ',"pine_time":' + str.tostring(timenow) + ',"timeframe":"' + timeframe.period + '","bar_time":' + str.tostring(time) + '}', alert.freq_once_per_bar)
 
     // ── TP2: remaining 50% exits ──
-    // _exitOK guard removed — TP can fire on fill bar (matches bot position monitor behavior)
-    if low <= tTP2
+    if _exitOK and low <= tTP2
         // Blended PnL: 50% booked at TP1 + 50% exiting at TP2
         _blended  = tTP1Hit ? 0.5 * (tEntry - tTP1) + 0.5 * (tEntry - tTP2) : (tEntry - tTP2)
         _pts      = math.round(_blended, 1)
