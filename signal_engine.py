@@ -74,16 +74,15 @@ class SignalConfig:
     # Prevents entries when chop is tiny and dynamic threshold drops too low.
     # Pine equivalent: useMinBody / minBodyPts (default ON, 250 pts for BTC 5m)
     use_min_body: bool  = True
-    min_body_pts: float = 250.0
+    min_body_pts: float = 50.0      # Live default: 50 pts (fly.toml)
 
     # ── Breakout Context Filter ────────────────────────────────────────────────
     # Require burst candle to actually break the prior N-bar range.
     # BUY:  close > ta.highest(high[1], breakout_ctx_bars)
     # SELL: close < ta.lowest(low[1],   breakout_ctx_bars)
-    # Pine: useBreakoutCtx=false (default OFF), breakoutCtxBars=8
     # Filters out big bodies inside consolidation that don't break any level.
-    use_breakout_ctx:  bool  = False
-    breakout_ctx_bars: int   = 8    # Pine default: breakoutCtxBars=8
+    use_breakout_ctx:  bool  = True  # Live default: ON (fly.toml)
+    breakout_ctx_bars: int   = 5     # Live default: 5 bars (fly.toml)
 
     # IST = UTC+5:30 session windows
     london_open:  int   = 11

@@ -94,11 +94,10 @@ USE_SESSION   = os.getenv("USE_SESSION",        "false").lower() == "true"
 SAFETY_FACTOR = float(os.getenv("SIGNAL_SAFETY_FACTOR", "1.0"))
 # Momentum Quality Filter A: Min Absolute Body
 # Blocks signal when candle body < MIN_BODY_PTS (same as Pine useMinBody/minBodyPts).
-# 250 pts confirmed better WR on BTC 5m historical — matches Pine setting.
 USE_MIN_BODY  = True    # Filter ON — block signals with body < min pts
-MIN_BODY_PTS  = float(os.getenv("MIN_BODY_PTS", "250.0"))  # Min body pts — 250pts = 82.9% WR (vs 60.1% at 50pts)
-USE_BREAKOUT_CTX = os.getenv("USE_BREAKOUT_CTX", "false").lower() == "true"
-BREAKOUT_CTX_BARS = int(os.getenv("BREAKOUT_CTX_BARS", "8"))
+MIN_BODY_PTS  = float(os.getenv("MIN_BODY_PTS", "50.0"))   # Live: 50 pts (fly.toml)
+USE_BREAKOUT_CTX = os.getenv("USE_BREAKOUT_CTX", "true").lower() == "true"
+BREAKOUT_CTX_BARS = int(os.getenv("BREAKOUT_CTX_BARS", "5"))
 # Heikin-Ashi mode: MUST match TradingView chart type.
 # True  → 78% WR, 46 trades (HA chart in TradingView) ← confirmed better
 # False → 49% WR, 173 trades (regular candle chart)
@@ -116,12 +115,12 @@ MAX_PRE_ENTRY_SLIP_PTS = float(os.getenv("MAX_PRE_ENTRY_SLIP_PTS", "0.0"))  # le
 # Limit entry — GTC limit at signal close price; waits for post-burst pullback
 # USE_LIMIT_ENTRY: true → entry via limit@signal-close valid ~1 candle (0 entry slippage, ~33% fill).
 #                  false → market entry at signal close (current default).
-USE_LIMIT_ENTRY        = os.getenv("USE_LIMIT_ENTRY", "false").lower() == "true"
-ENTRY_LIMIT_TIMEOUT_S  = int(os.getenv("ENTRY_LIMIT_TIMEOUT_S",  "45"))   # validity window (set = CANDLE_SECONDS for "1 candle")
+USE_LIMIT_ENTRY        = os.getenv("USE_LIMIT_ENTRY", "true").lower() == "true"
+ENTRY_LIMIT_TIMEOUT_S  = int(os.getenv("ENTRY_LIMIT_TIMEOUT_S",  "120"))  # 120s = 2 bars on 1m (Pine: limitValidBars=2)
 ENTRY_LIMIT_MAX_DRIFT  = float(os.getenv("ENTRY_LIMIT_MAX_DRIFT", "0.0")) # 0 = auto (1.5 × sl_dist); cancel if price runs this far
 # Fixed SL/TP override — set both > 0 to use fixed pts instead of ATR-based
-FIXED_SL_PTS           = float(os.getenv("FIXED_SL_PTS", "100.0"))  # 100pts fixed SL — scalp config (92.2% WR)
-FIXED_TP_PTS           = float(os.getenv("FIXED_TP_PTS",  "75.0"))  #  75pts fixed TP — scalp config (92.2% WR)
+FIXED_SL_PTS           = float(os.getenv("FIXED_SL_PTS", "50.0"))   # Live: 50 pts (fly.toml)
+FIXED_TP_PTS           = float(os.getenv("FIXED_TP_PTS", "50.0"))   # Live: 50 pts (fly.toml)
 MAX_DAILY_LOSS_PTS     = float(os.getenv("MAX_DAILY_LOSS_PTS",     "0"))  # 0=disabled; e.g. 500 = block new entries after -500pts/day
 MAX_ACCEPTABLE_SLIP_PTS= float(os.getenv("MAX_ACCEPTABLE_SLIP_PTS","0"))  # 0=disabled; TG alert if total entry+exit slip > this pts
 
