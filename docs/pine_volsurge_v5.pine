@@ -785,7 +785,11 @@ if barstate.islast and showJournal
         table.cell(jTbl, 9,  _liveRow, str.tostring(calcLots),                                          text_color=color.new(#d1d5db,0),  text_size=size.small, bgcolor=_lbg)
         table.cell(jTbl, 10, _liveRow, (_lCpnl >= 0 ? "+$" : "-$") + str.tostring(math.abs(_lCpnl)),  text_color=_lCol,                 text_size=size.small, bgcolor=_lbg)
         table.cell(jTbl, 11, _liveRow, (_lPnl  >= 0 ? "+$" : "-$") + str.tostring(math.abs(_lPnl)),   text_color=_lCol,                 text_size=size.small, bgcolor=_lbg)
-        table.cell(jTbl, 12, _liveRow, tTP1Hit ? "TP1 Hit · 50% Booked" : "Open",                      text_color=color.yellow,          text_size=size.small, bgcolor=_lbg)
+        _lTP2_hit  = tDir == 1 ? high >= tTP2 : low  <= tTP2
+        _lSL_hit   = tDir == 1 ? low  <= tSL  : high >= tSL
+        _lStatus   = _lTP2_hit ? "TP2 Hit!" : _lSL_hit ? "SL Hit!" : tTP1Hit ? "TP1 Hit · 50% Booked" : "Open"
+        _lStatCol  = _lTP2_hit ? color.new(#00e676,0) : _lSL_hit ? color.new(#f23645,0) : color.yellow
+        table.cell(jTbl, 12, _liveRow, _lStatus,                                                          text_color=_lStatCol,             text_size=size.small, bgcolor=_lbg)
         _lMFE = tDir == 1 ? math.max(0.0, high - tEntry) : math.max(0.0, tEntry - low)
         table.cell(jTbl, 13, _liveRow, "+" + str.tostring(math.round(_lMFE, 0)),                        text_color=color.new(#ff9800,0),  text_size=size.small, bgcolor=_lbg)
     else
