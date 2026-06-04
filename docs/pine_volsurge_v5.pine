@@ -522,8 +522,8 @@ if tDir == 1
         tDir    := 0
         tMaxFav := na
 
-    // ── SL: full or remaining 50% hits original SL ──
-    else if _exitOK and low <= tSL
+    // ── SL: fire even on fill bar — matches bot behavior
+    else if low <= tSL
         // Blended PnL: if TP1 was hit → 50% at TP1 + 50% at SL; else full loss
         _blended  = tTP1Hit ? 0.5 * (tTP1 - tEntry) + 0.5 * (tSL - tEntry) : (tSL - tEntry)
         _pts      = math.round(_blended, 1)
@@ -600,8 +600,8 @@ if tDir == -1
         tDir    := 0
         tMaxFav := na
 
-    // ── SL: full or remaining 50% hits original SL ──
-    else if _exitOK and high >= tSL
+    // ── SL: fire even on fill bar — matches bot behavior
+    else if high >= tSL
         // Blended PnL: if TP1 was hit → 50% at TP1 + 50% at SL; else full loss
         _blended  = tTP1Hit ? 0.5 * (tEntry - tTP1) + 0.5 * (tEntry - tSL) : (tEntry - tSL)
         _pts      = math.round(_blended, 1)
