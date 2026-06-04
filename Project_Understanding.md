@@ -179,12 +179,17 @@ flyctl ssh console -C "curl ifconfig.me" --app millionare-shivji-tradingbot
 
 ## Changelog
 
+### 04-Jun-2026 ~15:00 IST
+**Bug fix: Breakout trigger used real candle HIGH/LOW instead of HA HIGH/LOW**
+- `_breakout_px = candle.high` → fixed to `_breakout_px = ha_candle.high`
+- Same fix as Anand bot — both bots now use HA trigger to match Pine `pLimit := high`
+- File: `volsurge_v5_live.py`
+
 ### 04-Jun-2026 ~13:00 IST
 **Session: Parity audit + documentation update**
 - Verified full parity between Mummy Pine script (`docs/pine_volsurge_v5.pine`) and live bot config (`fly.toml`) — all params match (SL=15, TP=30, MIN_BODY=50, breakout ctx=true, bars=5, limit entry=true)
 - Confirmed entry mode: `watch_breakout_entry` with trigger = signal candle HIGH (BUY) / LOW (SELL) — matches Pine `pLimit := high`
 - Identified that Mummy Pine title `[LIMIT@HA-CLOSE]` is stale/incorrect — code uses breakout at HIGH/LOW
 - Updated `Project_Understanding.md` — corrected from 5min to 1min, corrected SL/TP from ATR-based to fixed 15/30, added full config, added changelog
-- **No code changes made to Mummy bot in this session**
 
 <!-- deploy-test: 04-Jun-2026 14:00 IST -->

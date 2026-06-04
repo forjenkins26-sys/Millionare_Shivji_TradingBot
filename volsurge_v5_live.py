@@ -1918,7 +1918,9 @@ def on_candle_close(candle: Candle, buffer: deque):
         _entry_processing = True
 
     trade_id = f"{sr.signal[0]}{int(recv_time * 1000)}"
-    _breakout_px = candle.high if sr.signal == "BUY" else candle.low
+    # Breakout trigger uses HA candle HIGH/LOW — matches Pine (pLimit := high on HA chart)
+    # Fixed: 04-Jun-2026
+    _breakout_px = ha_candle.high if sr.signal == "BUY" else ha_candle.low
 
     threading.Thread(
         target=_process_entry,
