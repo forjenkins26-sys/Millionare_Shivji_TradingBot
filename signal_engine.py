@@ -74,7 +74,7 @@ class SignalConfig:
     # Prevents entries when chop is tiny and dynamic threshold drops too low.
     # Pine equivalent: useMinBody / minBodyPts (default ON, 250 pts for BTC 5m)
     use_min_body: bool  = True
-    min_body_pts: float = 200.0     # Live default: 200 pts (fly.toml)
+    min_body_pts: float = 50.0      # Live default: 50 pts (fly.toml)
 
     # ── Breakout Context Filter ────────────────────────────────────────────────
     # Require burst candle to actually break the prior N-bar range.
